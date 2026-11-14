@@ -1,10 +1,16 @@
-FROM python:3.12-slim
+FROM ghcr.io/hydra-db/hydradb:0.4.0
 
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gosu python3 python3-venv python3-pip && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python3 -m venv /opt/contextgraph-venv && \
+    /opt/contextgraph-venv/bin/pip install --no-cache-dir -r requirements.txt
 COPY backend ./backend
 COPY web ./web
-EXPOSE 8000
-CMD ["sh", "-c", "uvicorn backend.app:app --host 0.0.0.0 --port ${PORT:-8000}"]
+COPY scripts/render_free_entrypoint.py /usr/local/bin/render-free-entrypoint.py
+ENV PYTHONPATH=/app PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+ENTRYPOINT ["python3", "/usr/local/bin/render-free-entrypoint.py"]

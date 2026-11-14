@@ -32,7 +32,9 @@ services:
       - "9090"
 
   api:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.api
     restart: unless-stopped
     depends_on:
       - hydradb

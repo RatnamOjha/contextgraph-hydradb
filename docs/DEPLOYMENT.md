@@ -26,7 +26,7 @@ The Compose file uses a demo token and plaintext only within the private contain
 
 ## Hosted demo
 
-The `render.yaml` Blueprint uses one **Render Free web service** to honor the no-cost requirement. `Dockerfile.render` packages the published HydraDB `0.4.0` image with the Python API. Both processes run in one container; HydraDB's HTTP, Bolt, and admin listeners bind to loopback, and only the API binds to Render's public port. On each start, the entrypoint waits for HydraDB, seeds a 100-tool catalog, runs the three-cycle evaluation, and then reports the service ready.
+The `render.yaml` Blueprint uses one **Render Free web service** to honor the no-cost requirement. The root `Dockerfile` packages the published HydraDB `0.4.0` image with the Python API. Both processes run in one container; HydraDB's HTTP, Bolt, and admin listeners bind to loopback, and only the API binds to Render's public port. On each start, the entrypoint waits for HydraDB, seeds a 100-tool catalog, runs the three-cycle evaluation, and then reports the service ready.
 
 This free setup is a demo deployment with volatile state. Render Free services have an ephemeral filesystem, cannot attach persistent disks, and spin down after 15 minutes without inbound traffic; waking a service takes about a minute. The graph is rebuilt after each sleep, restart, or redeploy. Startup restores the demo automatically, but past execution history does not persist. Render includes 750 free instance hours per workspace each calendar month. If free limits are exhausted without a payment method, Render suspends the free service rather than billing extra usage.
 
