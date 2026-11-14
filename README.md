@@ -4,6 +4,10 @@
 
 This is a Track 2 Agent Context Layer MVP built on the open-source HydraDB engine. It is not a client for HydraDB's hosted platform. The detailed source review and actual local persistence proof are in [docs/HYDRADB_PHASE0.md](docs/HYDRADB_PHASE0.md).
 
+## Live demo
+
+[Open ContextGraph](https://contextgraph-demo.onrender.com). It runs on Render's Free plan and rebuilds its 100-tool demo graph after sleep or restart; first request after idle may take about a minute.
+
 ## What works
 
 - HydraDB owns the context graph and all graph traversal and feedback updates.

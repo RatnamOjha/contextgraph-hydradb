@@ -40,4 +40,4 @@ Deployment references:
 - [Render persistent disk limitations](https://render.com/docs/disks)
 - [Render Blueprint reference](https://render.com/docs/blueprint-spec)
 
-No hosted service has been created yet. The Blueprint uses the free plan and creates no paid database or disk resource.
+The public free service is live at [contextgraph-demo.onrender.com](https://contextgraph-demo.onrender.com). It has no paid database or disk resource. The account's saved Render CLI authentication was used to create it; the deployment's generated HydraDB token is stored as a Render environment secret and is not in this repository.

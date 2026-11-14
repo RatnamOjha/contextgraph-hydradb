@@ -40,9 +40,9 @@ The integration point is between an MCP registry and an existing agent runtime: 
 
 ## Social post drafts
 
-**X:** We built ContextGraph for MCP catalog sprawl. Store skills, tools, dependencies, and known entities in HydraDB; traverse the task neighborhood; send the agent a compact tool context. The local demo compares graph routing with full context and keyword baselines at 20, 100, and 500 tools. https://github.com/RatnamOjha/contextgraph-hydradb
+**X:** We built ContextGraph for MCP catalog sprawl. Store skills, tools, dependencies, and known entities in HydraDB; traverse the task neighborhood; send the agent a compact tool context. The demo compares graph routing with full context and keyword baselines at 20, 100, and 500 tools. https://contextgraph-demo.onrender.com https://github.com/RatnamOjha/contextgraph-hydradb
 
-**LinkedIn:** Agent teams are adding tools faster than prompts can carry them. ContextGraph is an experimental context layer for MCP catalogs: it models skills, tools, dependencies, and resolved entities in HydraDB, then retrieves a task-specific neighborhood. Our reproducible local benchmark measures task success, tool recall, context estimate, and latency against full-context and keyword baselines. The demo is deterministic and the current results are limited to three fixed support tasks; we’re looking for teams willing to test it against real catalogs. https://github.com/RatnamOjha/contextgraph-hydradb
+**LinkedIn:** Agent teams are adding tools faster than prompts can carry them. ContextGraph is an experimental context layer for MCP catalogs: it models skills, tools, dependencies, and resolved entities in HydraDB, then retrieves a task-specific neighborhood. Our reproducible benchmark measures task success, tool recall, context estimate, and latency against full-context and keyword baselines. The demo is deterministic and the current results are limited to three fixed support tasks; we’re looking for teams willing to test it against real catalogs. https://contextgraph-demo.onrender.com https://github.com/RatnamOjha/contextgraph-hydradb
 
 ## Claims to preserve
 
