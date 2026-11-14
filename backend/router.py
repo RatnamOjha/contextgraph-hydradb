@@ -11,11 +11,13 @@ from .hydra import HydraClient, cypher_string
 
 def classify(text: str) -> str:
     value = text.lower()
-    if any(word in value for word in ("refund", "charge", "eligible", "qualify", "return")):
-        return "refund" if any(w in value for w in ("refund", "eligible", "qualify")) else "billing"
-    if any(word in value for word in ("invoice", "payment", "subscription", "charge")):
+    if any(word in value for word in ("refund", "eligible", "qualify")):
+        return "refund"
+    if any(word in value for word in ("invoice", "payment", "subscription", "charge", "billing")):
         return "billing"
-    return "delivery" if any(w in value for w in ("delivery", "shipment", "late", "carrier", "package")) else "refund"
+    if any(word in value for word in ("delivery", "shipment", "late", "carrier", "package", "return status", "return state", "return authorization")):
+        return "delivery"
+    return "refund"
 
 
 def terms(text: str) -> set[str]:

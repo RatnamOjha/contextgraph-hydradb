@@ -10,6 +10,9 @@ class ContextGraphCoreTests(unittest.TestCase):
         self.assertEqual(classify("invoice and disputed payment charge"), "billing")
         self.assertEqual(classify("the package delivery is late"), "delivery")
 
+    def test_return_status_routes_as_delivery(self):
+        self.assertEqual(classify("Inspect the shipment scan and return status for this late package."), "delivery")
+
     def test_flat_retrieval_uses_only_catalog_tools(self):
         catalog = make_catalog(100)
         result = flat_retrieve("check refund eligibility for order", catalog, limit=8)
