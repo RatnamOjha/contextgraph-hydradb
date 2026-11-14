@@ -1,0 +1,8 @@
+.git
+.venv
+.hydradb
+hydradb-upstream
+__pycache__
+*.py[cod]
+results/*.json
+.DS_Store

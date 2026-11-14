@@ -1,0 +1,7 @@
+FROM ghcr.io/hydra-db/hydradb:0.4.0
+
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends gosu && rm -rf /var/lib/apt/lists/*
+COPY scripts/hydradb-entrypoint.sh /usr/local/bin/contextgraph-hydradb-entrypoint
+RUN chmod 0755 /usr/local/bin/contextgraph-hydradb-entrypoint
+ENTRYPOINT ["/usr/local/bin/contextgraph-hydradb-entrypoint"]

@@ -64,6 +64,8 @@ Latency and token counts depend on hardware and are not production claims. Tool 
 
 The container deployment path and hosted topology notes are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). For a local container demo, run `./scripts/compose-up.sh`. The native one-command development path remains `./scripts/dev.sh`.
 
+The repository also includes a Render Blueprint for a private, disk-backed HydraDB service and a public API service. Review [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for storage constraints and paid plan details before creating the services.
+
 ## Product and go-to-market
 
 **Initial customer:** agent platform teams operating large internal MCP catalogs for support, IT, or operations workflows. They need to select compatible tools, preserve dependency order, and reuse known entities without loading every tool schema on each turn.

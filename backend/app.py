@@ -64,7 +64,7 @@ async def health():
         _, _, latency = await db.query(f"MATCH (n:Agent {{id: {db.id_for('Agent', 'support-agent')}}}) RETURN n.key AS key")
         return {"ok": True, "hydradb": "connected", "probe_ms": round(latency, 2)}
     except Exception as exc:
-        return {"ok": False, "hydradb": str(exc)}
+        raise HTTPException(status_code=503, detail={"ok": False, "hydradb": str(exc)}) from exc
 
 
 @app.post("/api/seed")

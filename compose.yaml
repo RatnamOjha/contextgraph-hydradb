@@ -1,6 +1,8 @@
 services:
   hydradb:
-    image: ghcr.io/hydra-db/hydradb:0.4.0
+    build:
+      context: .
+      dockerfile: Dockerfile.hydradb
     restart: unless-stopped
     environment:
       CLOUD_PROVIDER: local
@@ -21,10 +23,10 @@ services:
       GRAPH_DATA_CACHE_DIR: /var/cache/slatedb/data
       GRAPH_USAGE_REPORT_ENABLED: "false"
       RUST_LOG: warn
+      HYDRADB_TOKEN: contextgraph-local-development-token-32-bytes
     volumes:
       - hydradb-data:/var/lib/hydradb
       - hydradb-cache:/var/cache/slatedb
-      - ./.hydradb/auth-token:/run/secrets/hydra-token:ro
     expose:
       - "8443"
       - "9090"
