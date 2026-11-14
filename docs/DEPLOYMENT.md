@@ -28,7 +28,7 @@ The Compose file uses a demo token and plaintext only within the private contain
 
 Use one long-running HydraDB process with durable storage and a separate public API service. The API should reach HydraDB over the host's private network; publish only the API's HTTPS endpoint. For a quick single-node demo, a paid Render private service with a persistent disk can preserve HydraDB's local object-store directory. Mount the disk at `/var/lib/hydradb`, configure `CLOUD_PROVIDER=local` and `LOCAL_PATH=/var/lib/hydradb/store`, and keep the service at one instance. Render documents that its default filesystem is ephemeral, that a disk is single-instance, and that disk-backed deploys stop the old instance before starting the new one. This is suitable for a hackathon demo, with brief deploy downtime.
 
-The repo includes `render.yaml` for this topology. It uses a single 1 CPU/2 GB private HydraDB service with a 10 GB persistent disk and a 0.5 CPU/512 MB public API service in Singapore. Both plans are paid. The Blueprint generates a shared database token and the API health check waits for the graph query endpoint. Review the plan and disk charges in Render before syncing; no resource is provisioned by this repository commit.
+The repo includes `render.yaml` for this topology. It uses a single 1 CPU/2 GB private HydraDB service with a 10 GB persistent disk and a 0.5 CPU/512 MB public API service in Singapore. Both plans are paid. Based on Render's current published rates, compute is about $25/month plus $7/month, and the 10 GB disk is about $2.50/month, for roughly **$34.50/month** before bandwidth and taxes. Charges may be prorated for a shorter run. The Blueprint generates a shared database token and the API health check waits for the graph query endpoint. Review current charges before syncing; no resource is provisioned by this repository commit.
 
 For a longer-lived deployment, configure HydraDB's SlateDB object store to use an S3-compatible bucket instead of local disk. Store credentials as secrets, keep the graph service private, and follow HydraDB's upstream Helm chart for multi-node deployment. Do not run multiple graph-node processes against one local filesystem volume.
 
@@ -40,5 +40,6 @@ Deployment references:
 - [Render web services and port binding](https://render.com/docs/web-services)
 - [Render Blueprint reference](https://render.com/docs/blueprint-spec)
 - [Render compute plans](https://render.com/docs/compute-plans)
+- [Render pricing](https://render.com/pricing)
 
 No hosted service has been created yet. The repository contains a containerized demo path; creating a public deployment still requires a hosting account, service creation, domain choice, and production secrets.
