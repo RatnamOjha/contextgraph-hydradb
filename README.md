@@ -64,7 +64,7 @@ Latency and token counts depend on hardware and are not production claims. Tool 
 
 The container deployment path and hosted topology notes are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). For a local container demo, run `./scripts/compose-up.sh`. The native one-command development path remains `./scripts/dev.sh`.
 
-The repository also includes a Render Blueprint for a private, disk-backed HydraDB service and a public API service. Review [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for storage constraints and paid plan details before creating the services.
+The repository also includes a free Render Blueprint. It runs HydraDB and the API in one web service and reseeds demo data after each cold start; see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for free-tier lifecycle limits.
 
 ## Product and go-to-market
 

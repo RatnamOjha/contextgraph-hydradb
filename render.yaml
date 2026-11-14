@@ -1,78 +1,14 @@
-envVarGroups:
-  - name: contextgraph-hydra-auth
+services:
+  - type: web
+    name: contextgraph-demo
+    runtime: docker
+    dockerfilePath: ./Dockerfile.render
+    dockerContext: .
+    region: singapore
+    plan: free
+    healthCheckPath: /api/ready
     envVars:
       - key: HYDRADB_TOKEN
         generateValue: true
-
-services:
-  - type: pserv
-    name: contextgraph-db
-    runtime: docker
-    dockerfilePath: ./Dockerfile.hydradb
-    dockerContext: .
-    region: singapore
-    plan: 1c-2g
-    numInstances: 1
-    disk:
-      name: hydradb-data
-      mountPath: /var/lib/hydradb
-      sizeGB: 10
-    envVars:
-      - fromGroup: contextgraph-hydra-auth
-      - key: CLOUD_PROVIDER
-        value: local
-      - key: LOCAL_PATH
-        value: /var/lib/hydradb/store
-      - key: GRAPH_NAMESPACE
-        value: contextgraph
-      - key: GRAPH_ID
-        value: default
-      - key: GRAPH_CELL_ID
-        value: cell-0
-      - key: GRAPH_CELLS
-        value: cell-0
-      - key: GRAPH_DATA_PATH
-        value: data
-      - key: GRAPH_NODE_ID
-        value: node-0
-      - key: GRAPH_BOLT_NODE_ADDRESSES
-        value: node-0=127.0.0.1:7687
-      - key: GRAPH_BOLT_ADDR
-        value: 0.0.0.0:7687
-      - key: GRAPH_ADVERTISED_BOLT_ADDR
-        value: 127.0.0.1:7687
-      - key: GRAPH_HTTP_ADDR
-        value: 0.0.0.0:8443
-      - key: GRAPH_ADMIN_ADDR
-        value: 0.0.0.0:9090
-      - key: GRAPH_DATA_CACHE_DIR
-        value: /var/cache/slatedb/data
-      - key: GRAPH_USAGE_REPORT_ENABLED
-        value: "false"
-      - key: RUST_LOG
-        value: warn
-
-  - type: web
-    name: contextgraph-api
-    runtime: docker
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
-    region: singapore
-    plan: 0.5c-512mb
-    healthCheckPath: /api/health
-    envVars:
-      - key: HYDRA_URL
-        value: http://contextgraph-db:8443
-      - key: HYDRA_GRAPH
-        value: default
-      - key: HYDRA_NAMESPACE
-        value: contextgraph
-      - key: HYDRA_CELL
-        value: cell-0
-      - key: HYDRA_TOKEN
-        fromService:
-          type: pserv
-          name: contextgraph-db
-          envVarKey: HYDRADB_TOKEN
-      - key: LOG_LEVEL
-        value: INFO
+      - key: CONTEXTGRAPH_CATALOG_SIZE
+        value: "100"

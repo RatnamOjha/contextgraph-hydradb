@@ -67,6 +67,17 @@ async def health():
         raise HTTPException(status_code=503, detail={"ok": False, "hydradb": str(exc)}) from exc
 
 
+@app.get("/api/ready")
+async def ready():
+    try:
+        _, rows, _ = await db.query(f"MATCH (a:Agent {{id: {db.id_for('Agent', 'support-agent')}}}) RETURN a.key AS key")
+        if not rows:
+            raise HTTPException(status_code=503, detail="Demo catalog is still initializing")
+        return {"ok": True, "catalog": "ready"}
+    except HydraError as exc:
+        raise as_http_error(exc) from exc
+
+
 @app.post("/api/seed")
 async def seed(request: SeedRequest):
     try:
