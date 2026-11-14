@@ -106,4 +106,4 @@ FastAPI only stores the external API shell; HydraDB owns the context graph, path
 - The deterministic support catalog is a controlled benchmark fixture. It demonstrates the retrieval mechanism; it does not estimate market size or guarantee wins on arbitrary catalogs.
 - The current benchmark's retrieval advantage comes from multi-hop dependencies, prior entities, and a learned route edge. Flat retrieval is intentionally non-graph lexical overlap; embeddings are not included.
 - Graph retrieval gets slower as added tools share a selected skill; this is visible in the 500-tool results. Skill boundaries and tool metadata quality matter.
-- A public repository is created after the local project commit. No hosted demo, Loom video, or social post has been published from this workspace; they need host/recording access and explicit public content delivery.
+- Public repository: https://github.com/RatnamOjha/contextgraph-hydradb. No hosted demo, Loom video, or social post has been published from this workspace; they need host/recording access and explicit public content delivery.
