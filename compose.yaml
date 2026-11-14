@@ -1,0 +1,50 @@
+services:
+  hydradb:
+    image: ghcr.io/hydra-db/hydradb:0.4.0
+    restart: unless-stopped
+    environment:
+      CLOUD_PROVIDER: local
+      LOCAL_PATH: /var/lib/hydradb/store
+      GRAPH_NAMESPACE: contextgraph
+      GRAPH_ID: default
+      GRAPH_CELL_ID: cell-0
+      GRAPH_CELLS: cell-0
+      GRAPH_DATA_PATH: data
+      GRAPH_NODE_ID: node-0
+      GRAPH_BOLT_NODE_ADDRESSES: node-0=127.0.0.1:7687
+      GRAPH_BOLT_ADDR: 0.0.0.0:7687
+      GRAPH_ADVERTISED_BOLT_ADDR: 127.0.0.1:7687
+      GRAPH_HTTP_ADDR: 0.0.0.0:8443
+      GRAPH_ADMIN_ADDR: 0.0.0.0:9090
+      GRAPH_AUTH_TOKEN_FILE: /run/secrets/hydra-token
+      GRAPH_ALLOW_PLAINTEXT: "true"
+      GRAPH_DATA_CACHE_DIR: /var/cache/slatedb/data
+      GRAPH_USAGE_REPORT_ENABLED: "false"
+      RUST_LOG: warn
+    volumes:
+      - hydradb-data:/var/lib/hydradb
+      - hydradb-cache:/var/cache/slatedb
+      - ./.hydradb/auth-token:/run/secrets/hydra-token:ro
+    expose:
+      - "8443"
+      - "9090"
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - hydradb
+    environment:
+      HYDRA_URL: http://hydradb:8443
+      HYDRA_GRAPH: default
+      HYDRA_NAMESPACE: contextgraph
+      HYDRA_CELL: cell-0
+      HYDRA_TOKEN: contextgraph-local-development-token-32-bytes
+      PORT: 8000
+      LOG_LEVEL: INFO
+    ports:
+      - "8000:8000"
+
+volumes:
+  hydradb-data:
+  hydradb-cache:

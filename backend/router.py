@@ -1,0 +1,169 @@
+"""Context retrieval methods and deterministic execution for the playground."""
+from __future__ import annotations
+
+import re
+import time
+from typing import Any
+
+from .fixtures import TASKS, Tool, make_catalog
+from .hydra import HydraClient, cypher_string
+
+
+def classify(text: str) -> str:
+    value = text.lower()
+    if any(word in value for word in ("refund", "charge", "eligible", "qualify", "return")):
+        return "refund" if any(w in value for w in ("refund", "eligible", "qualify")) else "billing"
+    if any(word in value for word in ("invoice", "payment", "subscription", "charge")):
+        return "billing"
+    return "delivery" if any(w in value for w in ("delivery", "shipment", "late", "carrier", "package")) else "refund"
+
+
+def terms(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9_.-]+", text.lower()) if len(w) > 2}
+
+
+def flat_retrieve(text: str, catalog: list[Tool], limit: int = 8) -> list[Tool]:
+    query_terms = terms(text)
+    def score(tool: Tool) -> tuple[int, str]:
+        corpus = terms(f"{tool.key} {tool.name} {tool.description} {tool.server} {tool.skill} {tool.input_schema}")
+        return (len(query_terms & corpus), tool.key)
+    return sorted(catalog, key=score, reverse=True)[:limit]
+
+
+def tool_json(tool: Tool) -> dict[str, Any]:
+    return {"key": tool.key, "name": tool.name, "description": tool.description, "server": tool.server, "skill": tool.skill, "input_schema": tool.input_schema}
+
+
+async def route_graph(db: HydraClient, scenario: str) -> dict[str, Any]:
+    task_id = db.id_for("TaskType", scenario)
+    t0 = time.perf_counter()
+    _, ranks, _ = await db.query(
+        f"MATCH (tt:TaskType {{id: {task_id}}})-[r:REQUIRES]->(s:Skill) "
+        "RETURN s.id AS id, s.key AS key, r.weight AS weight ORDER BY weight DESC, key ASC LIMIT 1"
+    )
+    if not ranks:
+        raise RuntimeError(f"No TaskType-to-Skill route is registered for {scenario}")
+    skill_id, skill, skill_weight = ranks[0]
+    _, roots, root_latency = await db.query(
+        f"MATCH (tt:TaskType {{id: {task_id}}})-[:REQUIRES]->(s:Skill {{id: {int(skill_id)}}})-[:USES]->(t:Tool) "
+        "OPTIONAL MATCH (t)-[:PROVIDED_BY]->(m:MCPServer) "
+        "RETURN DISTINCT s.key AS skill, t.id AS id, t.key AS key, t.name AS name, t.description AS description, t.server AS server, t.schema AS schema, m.key AS mcp "
+        "ORDER BY key"
+    )
+    selected: dict[int, dict[str, Any]] = {}
+    root_ids: set[int] = set()
+    edges: list[dict[str, str]] = [{"from": scenario, "to": skill, "type": "REQUIRES"}]
+    for row in roots:
+        skill_key, ident, key, name, description, server, schema, mcp = row
+        ident = int(ident); root_ids.add(ident)
+        selected[ident] = {"id": ident, "key": key, "name": name, "description": description, "server": server, "schema": schema, "mcp": mcp}
+        edges.append({"from": skill_key, "to": key, "type": "USES"})
+        if mcp:
+            edges.append({"from": key, "to": mcp, "type": "PROVIDED_BY"})
+
+    # Bounded dependency expansion with a visited set. Each wave is a genuine
+    # HydraDB relationship query; cycles and repeated dependencies are guarded.
+    frontier = set(root_ids)
+    visited = set(root_ids)
+    traversal_ms = (time.perf_counter() - t0) * 1000
+    for _depth in range(4):
+        if not frontier:
+            break
+        ids = ", ".join(str(i) for i in sorted(frontier))
+        query_start = time.perf_counter()
+        _, dependencies, _ = await db.query(
+            f"MATCH (a:Tool)-[:DEPENDS_ON]->(b:Tool) WHERE a.id IN [{ids}] OPTIONAL MATCH (b)-[:PROVIDED_BY]->(m:MCPServer) "
+            "RETURN a.id AS src_id, a.key AS src, b.id AS id, b.key AS key, b.name AS name, b.description AS description, b.server AS server, b.schema AS schema, m.key AS mcp"
+        )
+        traversal_ms += (time.perf_counter() - query_start) * 1000
+        next_frontier: set[int] = set()
+        for src_id, src, ident, key, name, description, server, schema, mcp in dependencies:
+            ident = int(ident); src_id = int(src_id)
+            edges.append({"from": src, "to": key, "type": "DEPENDS_ON"})
+            if ident not in selected:
+                selected[ident] = {"id": ident, "key": key, "name": name, "description": description, "server": server, "schema": schema, "mcp": mcp}
+            if mcp:
+                edges.append({"from": key, "to": mcp, "type": "PROVIDED_BY"})
+            if ident not in visited:
+                next_frontier.add(ident)
+        visited.update(next_frontier)
+        frontier = next_frontier
+
+    _, entities, entity_ms = await db.query(
+        f"MATCH (tt:TaskType {{id: {task_id}}})-[:HAS_CONTEXT]->(ticket:Entity)-[:IDENTIFIES]->(customer:Entity)-[:HAS_ORDER]->(order:Entity) "
+        "RETURN ticket.external_id AS ticket, customer.external_id AS customer, order.external_id AS order"
+    )
+    resolved = []
+    if entities:
+        ticket, customer, order = entities[0]
+        resolved = [
+            {"type": "ticket", "id": ticket},
+            {"type": "customer", "id": customer},
+            {"type": "order", "id": order},
+        ]
+        edges.extend([
+            {"from": scenario, "to": f"ticket:{ticket}", "type": "HAS_CONTEXT"},
+            {"from": f"ticket:{ticket}", "to": f"customer:{customer}", "type": "IDENTIFIES"},
+            {"from": f"customer:{customer}", "to": f"order:{order}", "type": "HAS_ORDER"},
+        ])
+        selected = {ident: tool for ident, tool in selected.items() if tool["key"] not in {"customer.resolve", "orders.list"}}
+    traversal_ms += entity_ms
+    return {"skill": skill, "skill_weight": skill_weight, "tools": list(selected.values()), "edges": edges, "resolved_entities": resolved, "retrieval_ms": traversal_ms}
+
+
+def execute_fixture(scenario: str, method: str, tool_keys: set[str], resolved: list[dict[str, str]]) -> dict[str, Any]:
+    fixture = TASKS[scenario]
+    reused = ["customer.resolve", "orders.list"] if any(e["type"] == "customer" for e in resolved) else []
+    needed = [key for key in fixture["required"] if key not in reused]
+    trace = [{"step": "retrieve", "message": f"{len(tool_keys)} tool definitions retrieved via {method}"}]
+    outputs: list[dict[str, Any]] = []
+    if resolved:
+        trace.append({"step": "entity-reuse", "message": f"Reused resolved entities: {', '.join(e['id'] for e in resolved)}"})
+    missing: list[str] = []
+    calls = 0
+    completed = set(reused)
+    dependency_failures: list[str] = []
+    dependencies = {tool.key: tool.dependencies for tool in make_catalog(18)}
+    tool_results = {
+        "ticket.lookup": {"ticket_id": fixture["ticket"], "customer_id": fixture["customer"], "issue": "refund request / order support"},
+        "customer.resolve": {"customer_id": fixture["customer"], "canonical": True},
+        "customer.profile": {"customer_id": fixture["customer"], "tier": "standard", "status": "active"},
+        "orders.list": {"customer_id": fixture["customer"], "orders": [fixture["order"]]},
+        "order.get": {"order_id": fixture["order"], "status": "delivered", "total": 84.50},
+        "refund.eligibility": {"order_id": fixture["order"], "eligible": fixture["eligible"], "policy_reason": "within policy window" if fixture["eligible"] else "outside policy window"},
+        "invoice.lookup": {"customer_id": fixture["customer"], "invoice_id": "I-3401", "balance": 0},
+        "payment.history": {"customer_id": fixture["customer"], "events": ["authorized", "captured"]},
+        "shipment.track": {"order_id": fixture["order"], "last_scan": "regional hub", "eta": "2026-11-16"},
+        "return.status": {"order_id": fixture["order"], "return_authorized": False},
+    }
+    for key in fixture["required"]:
+        if key in reused:
+            trace.append({"step": key, "message": f"{key}: reused from HydraDB entity context"})
+            continue
+        if key not in tool_keys:
+            missing.append(key)
+            trace.append({"step": key, "message": f"{key}: unavailable in retrieved tool context"})
+            continue
+        blocked_by = [dep for dep in dependencies.get(key, ()) if dep not in completed]
+        if blocked_by:
+            dependency_failures.extend(blocked_by)
+            trace.append({"step": key, "message": f"{key}: blocked by unresolved dependencies {', '.join(blocked_by)}"})
+            continue
+        result = tool_results.get(key, {"ok": True, "action": key, "mode": "deterministic local fixture"})
+        outputs.append({"tool": key, "result": result})
+        completed.add(key)
+        calls += 1
+        trace.append({"step": key, "message": f"{key}: executed successfully", "result": result})
+    success = not missing and not dependency_failures
+    if not success:
+        answer = "The available context is missing required tools, so the task could not be completed safely."
+    elif scenario == "refund":
+        eligible = next((row["result"]["eligible"] for row in outputs if row["tool"] == "refund.eligibility"), False)
+        answer = f"Ticket {fixture['ticket']} maps to customer {fixture['customer']} and order {fixture['order']}. " + ("The order is eligible for a refund; no refund was issued." if eligible else "The order is not eligible under the current policy. No refund was issued.")
+    elif scenario == "billing":
+        balance = next((row["result"]["balance"] for row in outputs if row["tool"] == "invoice.lookup"), None)
+        answer = f"Ticket {fixture['ticket']} maps to customer {fixture['customer']}. The invoice lookup shows a current balance of {balance}; payment history shows the charge was captured."
+    else:
+        scan = next((row["result"]["last_scan"] for row in outputs if row["tool"] == "shipment.track"), "unknown")
+        answer = f"Ticket {fixture['ticket']} maps to customer {fixture['customer']} and order {fixture['order']}. The latest carrier scan is {scan}. The return status was checked; no write action was taken."
+    return {"success": success, "missing_tools": missing, "dependency_failures": dependency_failures, "trace": trace, "answer": answer, "tool_calls": calls, "tool_outputs": outputs, "reused_entities": resolved}

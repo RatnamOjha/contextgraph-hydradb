@@ -1,0 +1,9 @@
+/hydradb-upstream/
+/.hydradb/
+/web/node_modules/
+/.venv/
+__pycache__/
+*.py[cod]
+/results/*.json
+/results/*.csv
+.DS_Store
