@@ -63,7 +63,8 @@ The full-context agent recovered from one initial dependency-order rejection and
 ### Updated verification
 
 - The final-fixes sprint adds mocked 429/backoff, resume accounting, local checkpoint fallback, and graph state tests; current full-suite results are listed in the final report.
-- Python compile check and JavaScript syntax check passed.
+- Full offline suite: 27 tests run, 26 passed, one live Groq integration test skipped to avoid additional provider calls. Python compilation, JavaScript syntax, `git diff --check`, and Render Blueprint secret-name checks passed. A tracked-file scan found no Groq key-pattern matches.
+- Local HydraDB read-only verification showed the dependency tool in the normal route and omitted it under the request-scoped filter while the stored edge remained present at weight `1.0`. Direct dependency-edge `SET` and checkpoint `UNWIND/MERGE/SET` calls returned HTTP 500 in this local runtime; no graph-edge write occurred. The fallback snapshot at `data/evaluation-checkpoints/` records the measured provider attempts without adding a third result row.
 - Live Groq integration and real learning/rollback were verified earlier in this sprint against local HydraDB. No provider key is committed or included in this document.
 - Commit `297ee8a` was pushed to `main` and verified on Render. `/api/ready` and `/api/health` returned 200, the deployed OpenAPI includes `/api/evaluate/agent` and `/api/learning/agent-demo`, and a hosted fixture run verified status and payment total (`SUCCESS`, 2/2 objectives). `/api/agent/status` checks configuration, not provider-call health. A subsequent bounded pilot hit Groq 429 responses. The credential remains a server-side Render secret.
 
