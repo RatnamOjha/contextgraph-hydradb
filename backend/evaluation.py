@@ -38,7 +38,7 @@ async def evaluate_olist(db, case_count: int = 9) -> dict[str, Any]:
     case_results = []
     method_totals: dict[str, list[dict[str, Any]]] = {name: [] for name in (
         "full_context", "flat_lexical", "flat_dependency_expanded", "semantic_dependency_expanded",
-        "graph_learning_disabled", "hydradb_graph")}
+        "controlled_dependency_recovery_filter", "hydradb_current_graph")}
     tool_by_key = {tool.key: tool for tool in catalog}
     for i, order in enumerate(heldout):
         name, template, expected = CASES[i]
@@ -59,8 +59,8 @@ async def evaluate_olist(db, case_count: int = 9) -> dict[str, Any]:
             "flat_lexical": flat,
             "flat_dependency_expanded": expanded,
             "semantic_dependency_expanded": semantic,
-            "graph_learning_disabled": [tool_by_key[k] for k in before_keys],
-            "hydradb_graph": [tool_by_key[k] for k in graph_keys],
+            "controlled_dependency_recovery_filter": [tool_by_key[k] for k in before_keys],
+            "hydradb_current_graph": [tool_by_key[k] for k in graph_keys],
         }
         outputs = {}
         for method, selected in selected_by_method.items():
@@ -82,6 +82,8 @@ async def evaluate_olist(db, case_count: int = 9) -> dict[str, Any]:
             "mean_context_tokens_est": round(sum(r["context_tokens_est"] for r in rows)/len(rows), 1),
             "mean_tool_calls": round(sum(r["tool_calls"] for r in rows)/len(rows), 2)}
     return {"suite": "olist_deterministic_heldout_v1", "real_model_calls": 0,
+        "graph_learning_status": "not_run_no_isolated_named_graph_write_scope",
+        "learning_comparison_note": "The current graph is measured as configured. The controlled dependency-recovery filter is not a graph mutation; no corrected-graph learning comparison is claimed.",
         "limitations": ["Authored nine-case suite; descriptive results only, not statistically significant.",
             "Tool execution is deterministic over source rows; this does not measure Groq reasoning quality.",
             "Olist has no official refund policy; refund behavior is explicitly simulated."],
