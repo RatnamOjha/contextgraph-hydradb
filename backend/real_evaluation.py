@@ -20,7 +20,7 @@ REAL_CASES = [
     ("order_summary", "Summarize the order status and payment total for historical record {id}.", "orders"),
     ("payment_language", "I need the money trail: payment method, amount, and installments for record {id}.", "orders"),
 ]
-STRATEGIES = ("full_context", "flat_lexical", "flat_dependency_expanded", "hydradb_graph", "hydradb_graph_after_learning")
+STRATEGIES = ("full_context", "flat_lexical", "flat_dependency_expanded", "hydradb_graph", "hydradb_graph_after_controlled_recovery")
 log = logging.getLogger(__name__)
 
 
@@ -324,7 +324,7 @@ async def compare_real_agent(db, *, case_count: int = 1, max_provider_requests: 
         raise RuntimeError("Run the Real Agent Learning Demonstration first; graph-after-learning is not yet available.")
     tasks = [(REAL_CASES[i][0], REAL_CASES[i][1].format(id=heldout[i]["order_id"]), heldout[i]["order_id"]) for i in range(case_count)]
     model = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
-    fingerprint = {"suite": "groq_paired_context_pilot_v1", "model": model, "cases": tasks,
+    fingerprint = {"suite": "groq_paired_controlled_recovery_pilot_v2", "model": model, "cases": tasks,
         "strategies": STRATEGIES, "learning_updates": learning_updates}
     run_id = hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode()).hexdigest()[:24]
     payload = await _load_checkpoint(db, run_id) if resume else None

@@ -55,8 +55,8 @@ The first one-case free-tier pilot used the `openai/gpt-oss-20b` model and the f
 | Full context | Complete | `UNVERIFIED` | 3 | 4,031 / 706 | 0.00 / 2,538.62 ms | 4 attempts; 4 successful responses |
 | Flat lexical | Complete | `BLOCKED` after re-scoring saved evidence with the plural-dependency fix | 1 | 2,346 / 564 | 0.09 / 2,457.09 ms | 4 attempts; 4 successful responses |
 | Flat with dependency expansion | Rate limited | `NOT_RUN` | — | — | — | 22 attempts; 11 HTTP 200 in the final resume; total successful-response count unknown |
-| HydraDB graph with learning withheld | `NOT_RUN` | `NOT_RUN` | — | — | — | 0 attempts |
-| HydraDB graph after learning | `NOT_RUN` | `NOT_RUN` | — | — | — | 0 attempts |
+| HydraDB graph with controlled retrieval withholding | `NOT_RUN` | `NOT_RUN` | — | — | — | 0 attempts |
+| HydraDB graph after controlled recovery (historical label) | `NOT_RUN` | `NOT_RUN` | — | — | — | 0 attempts |
 
 The full-context agent recovered from one initial dependency-order rejection and successfully called `order.details` and `order.items`, but its final answer did not state verifiable item facts. The lexical strategy called `order.items` without `order.details`; the saved execution output records the prerequisite rejection. Its corrected outcome is `BLOCKED`, not a task failure or success. The run is preserved and resumable. The real-Groq comparative pilot is incomplete due to provider free-tier limits. No comparative superiority claim is made.
 
