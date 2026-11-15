@@ -24,9 +24,95 @@ STRATEGIES = ("full_context", "flat_lexical", "flat_dependency_expanded", "hydra
 log = logging.getLogger(__name__)
 
 
+class ResultPersistenceError(RuntimeError):
+    """The observed execution is journaled but not confirmed in HydraDB."""
+
+
 def _checkpoint_file(run_id: str) -> Path:
     root = Path(os.getenv("CONTEXTGRAPH_EVALUATION_CHECKPOINT_DIR", "data/evaluation-checkpoints"))
     return root / f"{run_id}.json"
+
+
+def _result_journal_file(run_id: str, case: str, strategy: str) -> Path:
+    root = Path(os.getenv("CONTEXTGRAPH_EVALUATION_CHECKPOINT_DIR", "data/evaluation-checkpoints")) / "observed-results"
+    key = hashlib.sha256(f"{run_id}|{case}|{strategy}".encode()).hexdigest()
+    return root / f"{key}.json"
+
+
+def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    temporary.replace(path)
+
+
+async def _persist_execution_result(db, run_id: str, row: dict[str, Any]) -> dict[str, Any]:
+    """Journal first, then idempotently write and verify the complete observed result."""
+    key = f"{run_id}|{row['case']}|{row['strategy']}"
+    result_id = db.id_for("EvaluationResult", key)
+    journal = _result_journal_file(run_id, row["case"], row["strategy"])
+    observed = {**row, "run_id": run_id, "result_id": result_id,
+                "persistence_status": "observed_pending_persistence"}
+    try:
+        _atomic_json(journal, {"run_id": run_id, "result_id": result_id, "state": "observed_pending_persistence", "result": observed})
+    except OSError as exc:
+        raise ResultPersistenceError("Evaluation result journal is not writable") from exc
+    confirmed = {**observed, "persistence_status": "hydradb_confirmed"}
+    serialized = json.dumps(confirmed, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    query = ("UNWIND $rows AS row MERGE (r {id: row.id}) "
+             "SET r:EvaluationResult, r.run_id=row.run_id, r.case=row.case, r.strategy=row.strategy, "
+             "r.state=row.state, r.result_json=row.result_json")
+    try:
+        await db.query(query, {"rows": [{"id": result_id, "run_id": run_id, "case": row["case"],
+            "strategy": row["strategy"], "state": row["state"], "result_json": serialized}]})
+        _, rows, _ = await db.query("MATCH (r:EvaluationResult {id: $id}) RETURN r.result_json AS result_json", {"id": result_id})
+        if not rows or rows[0][0] != serialized:
+            raise RuntimeError("HydraDB result readback did not match the observed result")
+    except Exception as exc:
+        raise ResultPersistenceError(f"Evaluation result persistence unconfirmed ({type(exc).__name__})") from exc
+    try:
+        _atomic_json(journal, {"run_id": run_id, "result_id": result_id, "state": "hydradb_confirmed", "result": confirmed})
+    except OSError:
+        log.warning("HydraDB confirmed result %s but its local journal acknowledgement could not be updated", result_id)
+    return confirmed
+
+
+def _load_observed_results(run_id: str) -> list[dict[str, Any]]:
+    root = _result_journal_file(run_id, "x", "x").parent
+    observed = []
+    if not root.exists():
+        return observed
+    for path in root.glob("*.json"):
+        try:
+            record = json.loads(path.read_text())
+            result = record.get("result") or {}
+            if record.get("run_id") == run_id and result.get("case") and result.get("strategy"):
+                observed.append(record)
+        except (OSError, ValueError, TypeError):
+            continue
+    return observed
+
+
+async def _load_hydradb_results(db, run_id: str) -> list[dict[str, Any]]:
+    try:
+        _, rows, _ = await db.query("MATCH (r:EvaluationResult {run_id: $run_id}) RETURN r.id AS id,r.result_json AS result_json",
+            {"run_id": run_id})
+    except Exception as exc:
+        raise ResultPersistenceError(f"Cannot inspect durable evaluation results ({type(exc).__name__})") from exc
+    results = []
+    for result_id, serialized in rows:
+        if not serialized:
+            continue
+        try:
+            result = json.loads(serialized)
+        except (ValueError, TypeError) as exc:
+            raise ResultPersistenceError("A durable HydraDB evaluation result is unreadable") from exc
+        expected_id = db.id_for("EvaluationResult", f"{run_id}|{result.get('case')}|{result.get('strategy')}")
+        if int(result_id) != expected_id or int(result.get("result_id", -1)) != expected_id:
+            raise ResultPersistenceError("A durable HydraDB evaluation result has an unexpected stable ID")
+        result["persistence_status"] = "hydradb_confirmed"
+        results.append(result)
+    return results
 
 
 def _local_applied_learning_updates() -> list[tuple[int, str, str]]:
@@ -70,6 +156,8 @@ async def _load_checkpoint(db, run_id: str) -> dict[str, Any] | None:
 
 
 async def _save_checkpoint(db, run_id: str, payload: dict[str, Any]) -> None:
+    payload.pop("checkpoint_store", None)
+    payload.pop("checkpoint_error", None)
     revision = int(payload.get("_checkpoint_revision", 0)) + 1
     payload["_checkpoint_revision"] = revision
     serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -78,15 +166,22 @@ async def _save_checkpoint(db, run_id: str, payload: dict[str, Any]) -> None:
         await db.query("UNWIND $rows AS row MERGE (c {id: row.id}) SET c:EvaluationCheckpoint, c.run_id=row.run_id, c.revision=row.revision, c.state=row.state, c.updated_at=row.updated_at, c.payload=row.payload",
             {"rows": [{"id": db.id_for("EvaluationCheckpointVersion", version_key), "run_id": run_id,
                 "revision": revision, "state": payload["state"], "updated_at": time.time(), "payload": serialized}]})
+        _, readback, _ = await db.query("MATCH (c:EvaluationCheckpoint {run_id: $run_id, revision: $revision}) RETURN c.payload AS payload",
+            {"run_id": run_id, "revision": revision})
+        if not readback or readback[0][0] != serialized:
+            raise RuntimeError("HydraDB checkpoint readback did not match the written snapshot")
+        payload["checkpoint_store"] = "HydraDB_readback_confirmed"
     except Exception as exc:
-        # The local HydraDB HTTP runtime currently rejects this MERGE/SET batch.
-        # Keep each completed pair resumable in an atomic local snapshot instead.
-        log.warning("HydraDB checkpoint write failed for %s; persisting local snapshot: %s", run_id, type(exc).__name__)
-    path = _checkpoint_file(run_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(serialized)
-    temporary.replace(path)
+        payload["checkpoint_store"] = "local_fallback_ephemeral"
+        payload["checkpoint_error"] = type(exc).__name__
+        log.warning("HydraDB checkpoint write/readback failed for %s; local snapshot is ephemeral: %s", run_id, type(exc).__name__)
+    try:
+        _atomic_json(_checkpoint_file(run_id), payload)
+    except OSError as exc:
+        if payload.get("checkpoint_store") != "HydraDB_readback_confirmed":
+            raise ResultPersistenceError("Neither HydraDB nor the local checkpoint snapshot could be confirmed") from exc
+        payload["checkpoint_error"] = "local checkpoint unavailable; per-result HydraDB records remain authoritative"
+        log.warning("HydraDB checkpoint %s is confirmed, but local checkpoint snapshot could not be written", run_id)
 
 
 def _normalize_checkpoint(payload: dict[str, Any]) -> dict[str, Any]:
@@ -146,6 +241,8 @@ def _normalize_checkpoint(payload: dict[str, Any]) -> dict[str, Any]:
 def _decorate_payload(payload: dict[str, Any]) -> dict[str, Any]:
     completed = {(row.get("case"), row.get("strategy")): row for row in payload.get("results", [])
                  if row.get("state") == "complete"}
+    pending = {(row.get("case"), row.get("strategy")): row for row in payload.get("results", [])
+               if row.get("state") == "observed_pending_persistence"}
     statuses = []
     for case in payload.get("case_tasks", []):
         for strategy in payload.get("strategies", STRATEGIES):
@@ -159,6 +256,11 @@ def _decorate_payload(payload: dict[str, Any]) -> dict[str, Any]:
                     row.get("provider_requests_attempted", row.get("provider_requests")))
                 succeeded = payload.get("successful_responses_by_case_strategy", {}).get(key,
                     row.get("provider_requests_succeeded", (row.get("execution") or {}).get("iterations")))
+            elif (case["name"], strategy) in pending:
+                row = pending[(case["name"], strategy)]
+                state, outcome, error = "PERSISTENCE_ERROR", "OBSERVED_UNPERSISTED", payload.get("persistence_error")
+                attempted = row.get("provider_requests_attempted")
+                succeeded = row.get("provider_requests_succeeded")
             elif payload.get("failed_case") == case["name"] and payload.get("failed_strategy") == strategy:
                 provider_error = payload.get("provider_error_info") or {}
                 if provider_error.get("kind") == "request_budget_exhausted" or payload.get("state") == "paused_budget":
@@ -203,8 +305,6 @@ def _decorate_payload(payload: dict[str, Any]) -> dict[str, Any]:
 async def compare_real_agent(db, *, case_count: int = 1, max_provider_requests: int = 15,
                              max_total_tokens: int = 40000, max_tool_calls: int = 20,
                              resume: bool = True) -> dict[str, Any]:
-    if not os.getenv("GROQ_API_KEY"):
-        raise RuntimeError("Set GROQ_API_KEY on the API server for real-agent evaluation.")
     case_count = max(1, min(3, case_count))
     max_provider_requests = max(1, min(30, max_provider_requests))
     max_total_tokens = max(512, min(60000, max_total_tokens))
@@ -246,7 +346,59 @@ async def compare_real_agent(db, *, case_count: int = 1, max_provider_requests: 
         max_provider_requests=payload["budget"]["provider_requests"]
         max_total_tokens=payload["budget"]["actual_tokens"]
         max_tool_calls=payload["budget"]["tool_calls"]
+    # Rebuild from durable result nodes first, then replay journal-only results.
+    # This still works after Render Free discards its local checkpoint directory.
+    try:
+        durable_results = await _load_hydradb_results(db, run_id)
+    except ResultPersistenceError as exc:
+        payload["state"] = "paused_persistence_error"
+        payload["persistence_error"] = str(exc)
+        _decorate_payload(payload)
+        await _save_checkpoint(db, run_id, payload)
+        return payload
+    durable_by_pair = {(r.get("case"), r.get("strategy")): r for r in durable_results}
+    journal_by_pair = {}
+    for journal_record in _load_observed_results(run_id):
+        observed = journal_record["result"]
+        journal_by_pair[(observed.get("case"), observed.get("strategy"))] = observed
+    for pair, observed in {**journal_by_pair, **durable_by_pair}.items():
+        pair = (observed.get("case"), observed.get("strategy"))
+        try:
+            if pair in durable_by_pair:
+                confirmed = durable_by_pair[pair]
+            else:
+                confirmed = await _persist_execution_result(db, run_id, observed)
+        except ResultPersistenceError as exc:
+            pending = {**observed, "state": "observed_pending_persistence",
+                       "persistence_status": "observed_pending_persistence"}
+            existing_index = next((i for i, r in enumerate(payload["results"])
+                                   if (r.get("case"), r.get("strategy")) == pair), None)
+            if existing_index is None:
+                payload["results"].append(pending)
+            else:
+                payload["results"][existing_index] = pending
+            payload["state"] = "paused_persistence_error"
+            payload["persistence_error"] = str(exc)
+            _decorate_payload(payload)
+            await _save_checkpoint(db, run_id, payload)
+            return payload
+        existing_index = next((i for i, r in enumerate(payload["results"])
+                               if (r.get("case"), r.get("strategy")) == pair), None)
+        if existing_index is None:
+            payload["results"].append(confirmed)
+        else:
+            payload["results"][existing_index] = confirmed
+    if _load_observed_results(run_id):
+        payload["state"] = "running"
+        _decorate_payload(payload)
+        await _save_checkpoint(db, run_id, payload)
     done = {(r["case"], r["strategy"]) for r in payload["results"] if r.get("state") == "complete"}
+    if len(done) < len(tasks) * len(STRATEGIES) and not os.getenv("GROQ_API_KEY"):
+        payload["state"] = "paused_provider_unavailable"
+        payload["provider_error"] = "GROQ_API_KEY is unavailable; observed results were recovered without provider calls."
+        _decorate_payload(payload)
+        await _save_checkpoint(db, run_id, payload)
+        return payload
     tool_by_key = {tool.key: tool for tool in DATA_TOOLS}
     strategy_count = len(tasks)*len(STRATEGIES)
     provider_budget_per_run = max_provider_requests//strategy_count
@@ -340,12 +492,23 @@ async def compare_real_agent(db, *, case_count: int = 1, max_provider_requests: 
             row["provider_requests_attempted"] = attempted
             row["provider_requests_succeeded"] = succeeded
             row["provider_responses_received"] = int(usage.get("provider_responses_received", succeeded))
-            payload["results"].append(row)
             if payload.get("failed_case") == case_name and payload.get("failed_strategy") == strategy:
                 payload.pop("failed_case", None)
                 payload.pop("failed_strategy", None)
                 payload.pop("provider_error", None)
                 payload.pop("provider_error_info", None)
+            try:
+                confirmed_row = await _persist_execution_result(db, run_id, row)
+            except ResultPersistenceError as exc:
+                pending_row = {**row, "state": "observed_pending_persistence",
+                               "persistence_status": "observed_pending_persistence"}
+                payload["results"].append(pending_row)
+                payload["state"] = "paused_persistence_error"
+                payload["persistence_error"] = str(exc)
+                _decorate_payload(payload)
+                await _save_checkpoint(db, run_id, payload)
+                return payload
+            payload["results"].append(confirmed_row)
             payload["state"] = "complete" if len(payload["results"]) == len(tasks)*len(STRATEGIES) else "running"
             _decorate_payload(payload)
             await _save_checkpoint(db, run_id, payload)

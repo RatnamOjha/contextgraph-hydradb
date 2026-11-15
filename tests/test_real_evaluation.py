@@ -1,5 +1,7 @@
+import json
 import unittest
 import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -98,9 +100,28 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
             "budget": {"provider_requests": 30, "actual_tokens": 60000, "tool_calls": 60}}
 
         class FakeDB:
+            def __init__(self): self.results = {}; self.checkpoints = {}
             @staticmethod
-            def id_for(kind, key): return 5
+            def id_for(kind, key):
+                from backend.hydra import HydraClient
+                return HydraClient.id_for(kind, key)
             async def query(self, query, params=None):
+                if "EvaluationResult" in query and query.startswith("UNWIND"):
+                    row = params["rows"][0]; self.results[row["id"]] = row["result_json"]
+                    return [], [], 0.1
+                if "r:EvaluationResult {run_id:" in query:
+                    found = [[ident, value] for ident, value in self.results.items()
+                             if json.loads(value).get("run_id") == params["run_id"]]
+                    return ["id", "result_json"], found, 0.1
+                if "EvaluationResult" in query:
+                    value = self.results.get(params["id"])
+                    return ["result_json"], [[value]] if value is not None else [], 0.1
+                if "EvaluationCheckpoint" in query and query.startswith("UNWIND"):
+                    row = params["rows"][0]; self.checkpoints[(row["run_id"], row["revision"])] = row["payload"]
+                    return [], [], 0.1
+                if "EvaluationCheckpoint" in query:
+                    value = self.checkpoints.get((params["run_id"], params["revision"]))
+                    return ["payload"], [[value]] if value is not None else [], 0.1
                 return ["update_id", "tool", "dependency"], [[7, "order.items", "order.details"]], 0.1
 
         items = [{"product_id": "prod", "seller_id": "seller", "category": "books"}]
@@ -113,7 +134,8 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
         route = {"tools": [{"key": tool.key} for tool in DATA_TOOLS],
             "resolved_entities": [{"type": "order", "id": order_id}], "retrieval_ms": 0.1, "edges": []}
         saved = AsyncMock()
-        with patch.dict("os.environ", {"GROQ_API_KEY": "test-only"}), \
+        with tempfile.TemporaryDirectory() as checkpoint_dir, patch.dict("os.environ", {"GROQ_API_KEY": "test-only",
+                "CONTEXTGRAPH_EVALUATION_CHECKPOINT_DIR": checkpoint_dir}), \
              patch("backend.real_evaluation.list_orders", return_value=orders), \
              patch("backend.real_evaluation._load_checkpoint", new=AsyncMock(return_value=checkpoint)), \
              patch("backend.real_evaluation._save_checkpoint", new=saved), \
@@ -130,6 +152,82 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["attempts_by_case_strategy"]["line_items|flat_dependency_expanded"], 11)
         self.assertTrue(all(row["completion_status"] == "COMPLETE" for row in result["strategy_status"]))
         self.assertEqual(saved.await_count, 4)
+
+    async def test_observed_result_replays_after_hydradb_500_without_repeating_provider_call(self):
+        order_id = "c" * 32
+        orders = [{"order_id": "0" * 32}, {"order_id": "1" * 32}, {"order_id": order_id}]
+        class FakeHydra:
+            def __init__(self): self.results = {}; self.checkpoints = {}; self.fail_result_once = True
+            @staticmethod
+            def id_for(kind, key):
+                from backend.hydra import HydraClient
+                return HydraClient.id_for(kind, key)
+            async def query(self, query, params=None):
+                if query.startswith("UNWIND") and "EvaluationResult" in query:
+                    row = params["rows"][0]
+                    if self.fail_result_once:
+                        self.fail_result_once = False
+                        raise RuntimeError("HTTP 500 storage error")
+                    self.results[row["id"]] = row["result_json"]
+                    return [], [], 0.1
+                if "r:EvaluationResult {run_id:" in query:
+                    found = [[ident, value] for ident, value in self.results.items()
+                             if json.loads(value).get("run_id") == params["run_id"]]
+                    return ["id", "result_json"], found, 0.1
+                if "EvaluationResult" in query:
+                    value = self.results.get(params["id"])
+                    return ["result_json"], [[value]] if value is not None else [], 0.1
+                if query.startswith("UNWIND") and "EvaluationCheckpoint" in query:
+                    row = params["rows"][0]
+                    self.checkpoints[(row["run_id"], row["revision"])] = row["payload"]
+                    return [], [], 0.1
+                if "EvaluationCheckpoint" in query and "revision" in params:
+                    value = self.checkpoints.get((params["run_id"], params["revision"]))
+                    return ["payload"], [[value]] if value is not None else [], 0.1
+                if "EvaluationCheckpoint" in query:
+                    return ["payload"], [[value] for (rid, _), value in self.checkpoints.items() if rid == params["run_id"]], 0.1
+                if "LearningUpdate" in query:
+                    return ["id", "tool", "dependency"], [[7, "order.items", "order.details"]], 0.1
+                return [], [], 0.1
+        db = FakeHydra()
+        calls = []
+        async def fake_agent(task, *args, **kwargs):
+            calls.append(task)
+            return {"answer": "Line items include one book; product prod; seller seller.", "tool_calls": 1,
+                "tool_outputs": [{"tool": "order.items", "result": {"data": [{"product_id": "prod", "seller_id": "seller", "category": "books"}]}, "error": False}],
+                "trace": [], "execution": {"invalid_calls": 0, "iterations": 1},
+                "agent": {"provider_requests_attempted": 1, "provider_responses_received": 1,
+                    "provider_requests_succeeded": 1, "provider_calls": 1, "input_tokens": 15, "output_tokens": 5}}
+        route = {"tools": [{"key": t.key} for t in DATA_TOOLS], "resolved_entities": [{"type": "order", "id": order_id}],
+            "retrieval_ms": 0.1, "edges": []}
+        with tempfile.TemporaryDirectory() as checkpoint_dir, patch.dict("os.environ", {"GROQ_API_KEY": "test-only",
+                "CONTEXTGRAPH_EVALUATION_CHECKPOINT_DIR": checkpoint_dir}), \
+             patch("backend.real_evaluation.list_orders", return_value=orders), \
+             patch("backend.real_evaluation.candidate_skills", return_value=[]), \
+             patch("backend.real_evaluation.route_graph_candidates", new=AsyncMock(return_value=route)), \
+             patch("backend.real_evaluation.flat_candidates", return_value=DATA_TOOLS), \
+             patch("backend.real_evaluation.run_groq_agent", new=fake_agent):
+            first = await compare_real_agent(db, case_count=1, max_provider_requests=30,
+                max_total_tokens=60000, max_tool_calls=60, resume=True)
+            self.assertEqual(first["state"], "paused_persistence_error")
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(first["results"][0]["persistence_status"], "observed_pending_persistence")
+            pending_status = next(row for row in first["strategy_status"] if row["strategy"] == "full_context")
+            self.assertEqual(pending_status["completion_status"], "PERSISTENCE_ERROR")
+            resumed = await compare_real_agent(db, case_count=1, max_provider_requests=30,
+                max_total_tokens=60000, max_tool_calls=60, resume=True)
+            for path in Path(checkpoint_dir).rglob("*"):
+                if path.is_file(): path.unlink()
+            db.checkpoints.clear()  # simulate Render Free losing the local checkpoint directory
+            restored_from_graph = await compare_real_agent(db, case_count=1, max_provider_requests=30,
+                max_total_tokens=60000, max_tool_calls=60, resume=True)
+        self.assertEqual(resumed["state"], "complete")
+        self.assertEqual(len(calls), len(STRATEGIES))
+        self.assertEqual(len(db.results), len(STRATEGIES))
+        self.assertTrue(all(row["persistence_status"] == "hydradb_confirmed" for row in resumed["results"]))
+        self.assertEqual(restored_from_graph["state"], "complete")
+        self.assertEqual(len(calls), len(STRATEGIES))
+        self.assertEqual(len(restored_from_graph["results"]), len(STRATEGIES))
 
 
 if __name__ == "__main__":

@@ -37,8 +37,22 @@ class FakeGraphDB:
                     "tool": row["tool"], "dependency": row["dependency"], "previous_weight": row["previous_weight"],
                     "applied_weight": row["previous_weight"], "pre_state": row["pre_state"],
                     "experiment_state": row["experiment_state"], "edge_identifier": row["edge_identifier"],
-                    "state": "experimenting"}
+                    "state": row["state"], "evidence": row["evidence"], "relationship_type": row["relationship_type"],
+                    "original_task": row["original_task"], "graph_version": row["graph_version"],
+                    "proposed_graph_correction": row["proposed_graph_correction"]}
             return [], [], 0.1
+        if "RETURN u.tool AS tool,u.dependency AS dependency,u.pre_state AS pre_state" in query:
+            u = self.updates[params["id"]]
+            return ["tool", "dependency", "pre_state", "experiment_state", "state", "original_task", "graph_version", "proposed_graph_correction"], [[
+                u["tool"], u["dependency"], u["pre_state"], u["experiment_state"], u["state"], u["original_task"],
+                u["graph_version"], u["proposed_graph_correction"]]], 0.1
+        if "RETURN u.state AS state,u.evidence AS evidence" in query:
+            u = self.updates[params["id"]]
+            return ["state", "evidence", "diagnosis", "post_state", "rollback_state"], [[
+                u.get("state"), u.get("evidence"), u.get("diagnosis"), u.get("post_state"), u.get("rollback_state")]], 0.1
+        if "RETURN u.state AS state,u.rollback_state AS rollback_state" in query:
+            u = self.updates[params["id"]]
+            return ["state", "rollback_state", "evidence"], [[u.get("state"), u.get("rollback_state"), u.get("evidence")]], 0.1
         if "RETURN u.id AS id" in query:
             rows = [[ident, row["tool"], row["dependency"], row["pre_state"], row["experiment_state"]]
                     for ident, row in self.updates.items() if row.get("state") == "experimenting"]
@@ -46,9 +60,9 @@ class FakeGraphDB:
         if "RETURN u.tool AS tool" in query:
             update_id = int(re.search(r"id: (\d+)", query).group(1))
             u = self.updates[update_id]
-            return ["tool", "dependency", "previous", "applied", "pre", "post", "state", "edge"], [[
+            return ["tool", "dependency", "previous", "applied", "pre", "post", "state", "edge", "evidence"], [[
                 u["tool"], u["dependency"], u["previous_weight"], u["applied_weight"], u["pre_state"],
-                u.get("post_state"), u["state"], u["edge_identifier"]]], 0.1
+                u.get("post_state"), u["state"], u["edge_identifier"], u.get("evidence")]], 0.1
         if "SET u.state = $state" in query:
             update_id = int(re.search(r"id: (\d+)", query).group(1))
             self.updates[update_id].update(params)
@@ -83,11 +97,20 @@ class DependencyStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(correction, baseline)
         self.assertEqual(rolled["state"], "rolled_back")
         self.assertEqual(rolled["restored_state"], baseline)
+        self.assertEqual(fake.updates[update_id]["original_task"], "train")
+        self.assertEqual(fake.updates[update_id]["graph_version"], app._read_learning_state(update_id)["graph_version"])
+        self.assertIn('"actual_execution_failure"', fake.updates[update_id]["evidence"])
+        self.assertEqual(app._read_learning_state(update_id)["evidence_store"], "HydraDB_readback_confirmed")
+        create_query = next(query for query in fake.queries if "MERGE (u {id: row.id})" in query)
+        self.assertIn("u.state=row.state", create_query)
+        self.assertIn("u.evidence=row.evidence", create_query)
+        self.assertNotIn("u.state='experimenting'", create_query)
         self.assertEqual(fake.weights, [1.0])
         self.assertEqual(len(fake.weights), 1)
         self.assertFalse(any("SET r.weight" in q for q in fake.queries))
         self.assertFalse(rolled["edge_written"])
         self.assertEqual(fake.updates[update_id]["state"], "rolled_back")
+        self.assertEqual(rolled["evidence_store"], "HydraDB_readback_confirmed")
 
     async def test_missing_or_duplicated_edge_fails_closed(self):
         with patch("backend.app.db", FakeGraphDB(weights=())):

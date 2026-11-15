@@ -6,6 +6,7 @@ import os
 import re
 import time
 import asyncio
+import hashlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -767,21 +768,33 @@ async def restore_dependency_state(tool_key: str, dependency_key: str, snapshot:
 
 
 async def create_learning_experiment(update_id: int, tool: str, dependency: str, learning_mode: str,
-                                     training: str, heldout: str, snapshot: dict) -> None:
+                                     training: str, heldout: str, snapshot: dict, original_task: str | None = None) -> None:
     snapshot_json = json.dumps(snapshot, separators=(",", ":"))
     experiment_state = {**snapshot, "retrieval_exclusion": {"from": tool, "relationship_type": "DEPENDS_ON", "to": dependency}}
     record = {"id": update_id, "tool": tool, "dependency": dependency, "learning_mode": learning_mode,
         "training_order": training, "heldout_order": heldout, "edge_identifier": dependency_edge_id(tool, dependency),
         "relationship_type": "DEPENDS_ON", "previous_weight": snapshot["weight"], "applied_weight": snapshot["weight"],
-        "pre_state": snapshot, "experiment_state": experiment_state, "state": "experimenting", "evidence": {}}
+        "pre_state": snapshot, "experiment_state": experiment_state, "state": "experimenting", "evidence": {},
+        "original_task": original_task or training,
+        "graph_version": hashlib.sha256(snapshot_json.encode()).hexdigest(),
+        "proposed_graph_correction": {"tool": tool, "relationship_type": "DEPENDS_ON", "dependency": dependency,
+            "declared_in_tool_metadata": True}}
     _write_learning_state(update_id, record)
     try:
-        await db.query("UNWIND $rows AS row MERGE (u {id: row.id}) SET u:LearningUpdate, u.tool=row.tool, u.dependency=row.dependency, u.learning_mode=row.learning_mode, u.training_order=row.training_order, u.heldout_order=row.heldout_order, u.edge_identifier=row.edge_identifier, u.relationship_type='DEPENDS_ON', u.previous_weight=row.previous_weight, u.applied_weight=row.applied_weight, u.pre_state=row.pre_state, u.experiment_state=row.experiment_state, u.state='experimenting', u.evidence='{}'",
+        await db.query("UNWIND $rows AS row MERGE (u {id: row.id}) SET u:LearningUpdate, u.tool=row.tool, u.dependency=row.dependency, u.learning_mode=row.learning_mode, u.training_order=row.training_order, u.heldout_order=row.heldout_order, u.edge_identifier=row.edge_identifier, u.relationship_type=row.relationship_type, u.previous_weight=row.previous_weight, u.applied_weight=row.applied_weight, u.pre_state=row.pre_state, u.experiment_state=row.experiment_state, u.state=row.state, u.evidence=row.evidence, u.original_task=row.original_task, u.graph_version=row.graph_version, u.proposed_graph_correction=row.proposed_graph_correction",
             {"rows": [{"id": update_id, "tool": tool, "dependency": dependency, "learning_mode": learning_mode,
                 "training_order": training, "heldout_order": heldout, "edge_identifier": record["edge_identifier"],
-                "previous_weight": snapshot["weight"], "applied_weight": snapshot["weight"],
-                "pre_state": snapshot_json, "experiment_state": json.dumps(experiment_state, separators=(",", ":"))}]})
-        record["evidence_store"] = "HydraDB"
+                "relationship_type": "DEPENDS_ON", "previous_weight": snapshot["weight"], "applied_weight": snapshot["weight"],
+                "pre_state": snapshot_json, "experiment_state": json.dumps(experiment_state, separators=(",", ":")),
+                "state": "experimenting", "evidence": "{}", "original_task": record["original_task"],
+                "graph_version": record["graph_version"], "proposed_graph_correction": json.dumps(record["proposed_graph_correction"], separators=(",", ":"))}]})
+        _, rows, _ = await db.query("MATCH (u:LearningUpdate {id: $id}) RETURN u.tool AS tool,u.dependency AS dependency,u.pre_state AS pre_state,u.experiment_state AS experiment_state,u.state AS state,u.original_task AS original_task,u.graph_version AS graph_version,u.proposed_graph_correction AS proposed_graph_correction",
+            {"id": update_id})
+        if not rows or rows[0] != [tool, dependency, snapshot_json,
+                json.dumps(experiment_state, separators=(",", ":")), "experimenting", record["original_task"],
+                record["graph_version"], json.dumps(record["proposed_graph_correction"], separators=(",", ":"))]:
+            raise RuntimeError("HydraDB learning record readback did not match the experiment snapshot")
+        record["evidence_store"] = "HydraDB_readback_confirmed"
     except Exception as exc:
         record["evidence_store"] = "local_sidecar"
         log.warning("HydraDB learning record create failed for %s; keeping local evidence record: %s", update_id, type(exc).__name__)
@@ -790,17 +803,39 @@ async def create_learning_experiment(update_id: int, tool: str, dependency: str,
 
 async def finish_learning_experiment(update_id: int, *, state: str, evidence: dict | list,
                                      diagnosis: str, post_state: dict | None = None,
-                                     rollback_state: dict | None = None) -> None:
+                                     rollback_state: dict | None = None,
+                                     retrieval_snapshot: dict | None = None,
+                                     heldout_retest: dict | None = None) -> None:
     record = _read_learning_state(update_id) or {"id": update_id}
-    record.update({"state": state, "evidence": evidence, "diagnosis": diagnosis,
+    if retrieval_snapshot is not None: record["retrieval_snapshot"] = retrieval_snapshot
+    if heldout_retest is not None: record["heldout_retest"] = heldout_retest
+    evidence_record = {"original_task": record.get("original_task"),
+        "retrieval_snapshot": record.get("retrieval_snapshot") or record.get("experiment_state"),
+        "actual_execution_failure": evidence, "proposed_graph_correction": record.get("proposed_graph_correction"),
+        "validation_evidence": diagnosis, "correction_status": state,
+        "graph_version": record.get("graph_version"), "heldout_retest": record.get("heldout_retest"),
+        "rollback_information": rollback_state or record.get("rollback_state")}
+    record.update({"state": state, "evidence": evidence, "evidence_record": evidence_record, "diagnosis": diagnosis,
         "post_state": post_state, "rollback_state": rollback_state, "finished_at": time.time()})
     try:
-        await db.query(f"MATCH (u:LearningUpdate {{id: {update_id}}}) SET u.state = $state, u.evidence = $evidence, u.diagnosis = $diagnosis, u.post_state = $post_state, u.rollback_state = $rollback_state, u.finished_at = $finished_at",
-            {"state": state, "evidence": json.dumps(evidence, ensure_ascii=False), "diagnosis": diagnosis,
-                "post_state": json.dumps(post_state, separators=(",", ":")) if post_state is not None else None,
-                "rollback_state": json.dumps(rollback_state, separators=(",", ":")) if rollback_state is not None else None,
-                "finished_at": record["finished_at"]})
-        if record.get("evidence_store") != "local_sidecar": record["evidence_store"] = "HydraDB"
+        assignments = ["u.state = $state", "u.evidence = $evidence", "u.diagnosis = $diagnosis", "u.finished_at = $finished_at"]
+        parameters = {"state": state, "evidence": json.dumps(evidence_record, ensure_ascii=False),
+            "diagnosis": diagnosis, "finished_at": record["finished_at"]}
+        if post_state is not None:
+            assignments.append("u.post_state = $post_state")
+            parameters["post_state"] = json.dumps(post_state, separators=(",", ":"))
+        if rollback_state is not None:
+            assignments.append("u.rollback_state = $rollback_state")
+            parameters["rollback_state"] = json.dumps(rollback_state, separators=(",", ":"))
+        await db.query(f"MATCH (u:LearningUpdate {{id: {update_id}}}) SET " + ", ".join(assignments), parameters)
+        _, rows, _ = await db.query("MATCH (u:LearningUpdate {id: $id}) RETURN u.state AS state,u.evidence AS evidence,u.diagnosis AS diagnosis,u.post_state AS post_state,u.rollback_state AS rollback_state",
+            {"id": update_id})
+        expected = [state, json.dumps(evidence_record, ensure_ascii=False), diagnosis,
+            json.dumps(post_state, separators=(",", ":")) if post_state is not None else None,
+            json.dumps(rollback_state, separators=(",", ":")) if rollback_state is not None else None]
+        if not rows or rows[0] != expected:
+            raise RuntimeError("HydraDB learning evidence readback did not match the execution evidence")
+        if record.get("evidence_store") != "local_sidecar": record["evidence_store"] = "HydraDB_readback_confirmed"
     except Exception as exc:
         record["evidence_store"] = "local_sidecar"
         log.warning("HydraDB learning record update failed for %s; keeping local evidence record: %s", update_id, type(exc).__name__)
@@ -864,7 +899,7 @@ async def learning_demo():
         if baseline["weight"] <= 0:
             raise HTTPException(409, detail="The dependency is already inactive; the fixture experiment requires an active baseline edge.")
         update_id = int(time.time_ns() & ((1 << 62) - 1)) or 3
-        await create_learning_experiment(update_id, tool_key, dependency, "fixture", training, heldout, baseline)
+        await create_learning_experiment(update_id, tool_key, dependency, "fixture", training, heldout, baseline, train_task)
         correction_applied = False
         finished = False
         try:
@@ -898,6 +933,12 @@ async def learning_demo():
             after = execute_deterministic(test_task, heldout, after_tools, DEFAULT_DB)
             await record_learning_execution(test_task, "graph:fixture:after-learning", after["success"], after_candidates,
                 [tool.key for tool in after_tools], after["tool_outputs"], after_route["resolved_entities"], 0.0, None)
+            await finish_learning_experiment(update_id, state="applied", evidence=evidence,
+                diagnosis="controlled_dependency_recovery_filter_removed", post_state=corrected_state,
+                retrieval_snapshot={"training_tools": [tool.key for tool in before_tools], "edges": before_route["edges"],
+                    "resolved_entities": before_route["resolved_entities"]},
+                heldout_retest={"task": test_task, "order_id": heldout, "success": after["success"],
+                    "selected_tools": [tool.key for tool in after_tools], "tool_outputs": after["tool_outputs"]})
             finished = True
             return {"state": "applied", "update_id": update_id, "mode": "fixture", "training_order_id": training, "heldout_order_id": heldout,
                 "evidence_store": (_read_learning_state(update_id) or {}).get("evidence_store"),
@@ -941,7 +982,7 @@ async def agent_learning_demo():
         if not declared or dependency not in declared.dependencies:
             raise HTTPException(409, detail="The catalog no longer declares the dependency required for this controlled demonstration.")
         update_id = int(time.time_ns() & ((1 << 62) - 1)) or 3
-        await create_learning_experiment(update_id, tool_key, dependency, "real_groq", training, heldout, baseline)
+        await create_learning_experiment(update_id, tool_key, dependency, "real_groq", training, heldout, baseline, train_task)
         correction_applied = False
         finished = False
         experiment_state = None
@@ -1028,6 +1069,12 @@ async def agent_learning_demo():
             after["success"] = after_outcome["code"] == "SUCCESS"
             await record_learning_execution(test_task, "graph:real-agent-learning:after", after["success"], after_candidates,
                 sorted(after_keys), after["tool_outputs"], after_route["resolved_entities"], after_route["retrieval_ms"], after.get("agent"))
+            await finish_learning_experiment(update_id, state="applied", evidence=evidence,
+                diagnosis="controlled_dependency_recovery_filter_removed", post_state=corrected_state,
+                retrieval_snapshot={"training_tools": sorted(before_keys), "edges": before_route["edges"],
+                    "resolved_entities": before_route["resolved_entities"]},
+                heldout_retest={"task": test_task, "order_id": heldout, "outcome": after_outcome,
+                    "retrieved_tools": sorted(after_keys), "tool_outputs": after["tool_outputs"]})
             before_context = max(1, sum(len(json.dumps(tool_json(t), separators=(",", ":"))) for t in before_tools)//4)
             after_context = max(1, sum(len(json.dumps(tool_json(t), separators=(",", ":"))) for t in after_tools)//4)
             finished = True
@@ -1073,19 +1120,20 @@ async def rollback_learning(update_id: int):
     try:
         async with _learning_lock:
             try:
-                _, rows, _ = await db.query(f"MATCH (u:LearningUpdate {{id: {update_id}}}) RETURN u.tool AS tool,u.dependency AS dependency,u.previous_weight AS previous_weight,u.applied_weight AS applied_weight,u.pre_state AS pre_state,u.post_state AS post_state,u.state AS state,u.edge_identifier AS edge_identifier")
+                _, rows, _ = await db.query(f"MATCH (u:LearningUpdate {{id: {update_id}}}) RETURN u.tool AS tool,u.dependency AS dependency,u.previous_weight AS previous_weight,u.applied_weight AS applied_weight,u.pre_state AS pre_state,u.post_state AS post_state,u.state AS state,u.edge_identifier AS edge_identifier,u.evidence AS evidence")
             except Exception as exc:
                 log.warning("HydraDB rollback lookup failed for %s; checking local evidence: %s", update_id, type(exc).__name__)
                 rows = []
             local = _read_learning_state(update_id)
             if rows:
-                tool, dependency, previous, applied, pre_json, post_json, state, edge_id = rows[0]
+                tool, dependency, previous, applied, pre_json, post_json, state, edge_id, evidence_json = rows[0]
                 before = json.loads(pre_json) if pre_json else {"edge_exists": True, "weight": float(previous), "properties": {"weight": float(previous)}}
                 expected_after = json.loads(post_json) if post_json else {"edge_exists": True, "weight": float(applied), "properties": {"weight": float(applied)}}
                 record_store = "HydraDB"
                 local = local or {"id": update_id, "tool": tool, "dependency": dependency, "previous_weight": previous,
                     "applied_weight": applied, "pre_state": before, "post_state": expected_after, "state": state,
-                    "edge_identifier": edge_id, "evidence_store": "HydraDB"}
+                    "edge_identifier": edge_id, "evidence_store": "HydraDB",
+                    "evidence_record": json.loads(evidence_json) if evidence_json else {}}
             elif local:
                 tool, dependency, state, edge_id = local.get("tool"), local.get("dependency"), local.get("state"), local.get("edge_identifier")
                 before = local.get("pre_state") or {"edge_exists": True, "weight": float(local["previous_weight"]), "properties": {"weight": float(local["previous_weight"])}}
@@ -1102,11 +1150,22 @@ async def rollback_learning(update_id: int):
                 raise HTTPException(409, detail=f"The dependency edge changed outside this retrieval experiment; expected {before}, observed {restored}. No rollback was applied.")
             if local:
                 local.update({"state": "rolled_back", "rollback_state": restored, "rolled_back_at": time.time()})
+                if not isinstance(local.get("evidence_record"), dict):
+                    local["evidence_record"] = {"legacy_evidence": local.get("evidence", [])}
+                local["evidence_record"]["rollback_information"] = restored
+                local["evidence_record"]["correction_status"] = "rolled_back"
                 _write_learning_state(update_id, local)
             if rows:
                 try:
-                    await db.query(f"MATCH (u:LearningUpdate {{id: {update_id}}}) SET u.state = $state, u.rollback_state = $rollback_state, u.rolled_back_at = $rolled_back_at",
-                        {"state": "rolled_back", "rollback_state": json.dumps(restored, separators=(",", ":")), "rolled_back_at": time.time()})
+                    rollback_json = json.dumps(restored, separators=(",", ":"))
+                    evidence_json = json.dumps((local or {}).get("evidence_record", {}), ensure_ascii=False)
+                    await db.query(f"MATCH (u:LearningUpdate {{id: {update_id}}}) SET u.state = $state, u.rollback_state = $rollback_state, u.rolled_back_at = $rolled_back_at, u.evidence = $evidence",
+                        {"state": "rolled_back", "rollback_state": rollback_json, "rolled_back_at": time.time(), "evidence": evidence_json})
+                    _, verify_rows, _ = await db.query("MATCH (u:LearningUpdate {id: $id}) RETURN u.state AS state,u.rollback_state AS rollback_state,u.evidence AS evidence",
+                        {"id": update_id})
+                    if not verify_rows or verify_rows[0] != ["rolled_back", rollback_json, evidence_json]:
+                        raise RuntimeError("HydraDB rollback marker readback mismatch")
+                    record_store = "HydraDB_readback_confirmed"
                 except Exception as exc:
                     record_store = "local_sidecar"
                     log.warning("HydraDB rollback marker failed for %s; local state updated: %s", update_id, type(exc).__name__)
