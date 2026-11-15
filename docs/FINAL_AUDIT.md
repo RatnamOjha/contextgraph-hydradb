@@ -33,3 +33,30 @@ The authored nine-case benchmark is too small for significance claims. The seman
 ## HydraDB constraints
 
 The ignored `hydradb-upstream/` checkout describes HydraDB as a Rust graph engine over SlateDB. The app exercises supported OpenCypher reads, bounded client-side dependency traversal, parameterized `UNWIND` node merge, and batched relationship writes. It avoids assuming complete Neo4j/Cypher compatibility. Local filesystem persistence is for development; durable hosted graph storage requires an object-store-backed deployment.
+
+## Final judge-readiness sprint (November 2026)
+
+### Objective-level answer checks
+
+The previous real-agent `MISS` label came from comparing model-called tool names against a keyword-derived required-tool list. It did not check whether the answer stated the requested facts correctly or whether returned tool data supported them. The updated result keeps retrieval coverage, execution trace, and factual answer evaluation separate. Deterministic checks compare order status, payment totals and methods, line items, seller IDs, and delivery timing against actual tool outputs. Item price plus freight is not treated as the payment total. Missing actual delivery time does not imply non-delivery. The evaluator reports `SUCCESS`, `PARTIAL`, `FAILURE`, `BLOCKED`, or `UNVERIFIED`, with per-objective evidence and reasons. Claims without deterministic verifiers remain unverified rather than being scored by the same model.
+
+### Real Groq agent learning evidence
+
+The real-agent learning endpoint was run against the local HydraDB and the `openai/gpt-oss-20b` Groq model. With `order.items → order.details` removed, the training run retrieved only `order.items`; Groq selected that tool, and the actual executor rejected it because `order.details` had not run. The endpoint validated this observed prerequisite against the declared tool schema, applied the HydraDB edge, and retested a different order with the corrected graph. The recorded held-out run returned a source-supported `SUCCESS`, called `order.details` then `order.items`, and verified the requested product/category fact. Rollback then restored the demonstration edge weight to `1.0`; a fresh graph route confirmed the edge remains in the baseline state. The response and HydraDB `LearningUpdate` retain the actual trace, evidence, held-out order, and mutation ID. This demonstrates one successful transfer case, not a general learning guarantee.
+
+### Paired real-agent pilot
+
+`POST /api/evaluate/agent` runs the same held-out request across full context, flat lexical retrieval, dependency-expanded flat retrieval, graph retrieval with the learned edge withheld, and graph retrieval after learning. Cases run sequentially with equal per-strategy request/token/tool-call budgets. Each completed case-strategy result is checkpointed in HydraDB and is skipped on resume. This uses the same model and evaluator for each strategy.
+
+The first one-case free-tier pilot was attempted with a 20-request cap, then resumed with the 30-request endpoint ceiling after a provider rate limit. It recorded **18 provider attempts** across the original run and resume, and completed two of five strategies before Groq rate-limited the next strategy again. Both completed rows were `UNVERIFIED`: full context made three actual tool calls (including recovering from an initial dependency-order error), while flat lexical retrieval exposed `order.items` without its prerequisite and its call failed. This partial result is checkpointed; it does not support a graph win claim. Other strategy measurements are unavailable because the free-tier provider returned 429 responses within the configured retry window. Resume can continue from the saved checkpoint if provider quota permits.
+
+### Updated verification
+
+- Offline unit suite: 14 tests passed and one live integration test skipped because this test invocation had no local HydraDB configured (15 total). The live Groq integration had passed earlier against the local HydraDB instance.
+- Python compile check and JavaScript syntax check passed.
+- Live Groq integration and real learning/rollback were verified earlier in this sprint against local HydraDB. No provider key is committed or included in this document.
+- Hosted deployment status must be checked after the final commit. The Render service only receives Groq credentials if the service owner adds the secret in Render settings.
+
+### Remaining limits
+
+The Groq comparison is currently an incomplete, single-case pilot due to free-tier rate limits; it must not be presented as evidence of comparative superiority. The deterministic Olist objective checks cover only implemented task types, and the benchmark prompts are authored rather than statistically sampled. The local Groq key is not copied into Render. The app still uses local SQLite, and Render Free filesystem state is ephemeral.

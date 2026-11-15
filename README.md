@@ -6,11 +6,11 @@
 
 [Open ContextGraph](https://contextgraph-demo.onrender.com). The Render Blueprint is configured for the Free plan. Free services sleep when idle and use ephemeral local storage, so the graph is reseeded after restart. The bundled SQLite demo subset is included in the image.
 
-The dashboard has three views: a graph-routed order workflow with deterministic fixture and real Groq agent modes; a dependency failure, evidence validation, graph update, held-out retest, and rollback; and a searchable tool registry. The held-out comparison reports graph, lexical, dependency-expanded, semantic candidate, graph-learning-disabled, and full-context methods case by case.
+The dashboard has three views: a graph-routed order workflow with deterministic fixture and real Groq agent modes; a dependency failure, evidence validation, graph update, held-out retest, and rollback; and a searchable tool registry. The fixture evaluation remains reproducible. A separate sequential, checkpointed real-Groq pilot compares full context, flat lexical retrieval, flat retrieval with prerequisite expansion, HydraDB graph retrieval, and graph retrieval after a validated real-agent learning update.
 
 ### Execution modes
 
-`POST /api/run` accepts `execution_mode: "fixture" | "agent"` and `method: "graph" | "flat" | "expanded_flat" | "full"`. Fixture mode reads actual Olist rows through deterministic tools. Agent mode sends the graph-retrieved read-only tool definitions to Groq, accepts model-chosen JSON arguments, validates dependencies and entity IDs, executes the calls against the local data store, and returns the model's answer. Provider errors do not fall back to fixture mode. Configure `GROQ_API_KEY` and optionally `GROQ_MODEL` (default `openai/gpt-oss-20b`) on the API server. `GET /api/agent/status` reports availability without exposing credentials. The optional real-model evaluation is limited to three cases; the default nine-case evaluation makes no model calls.
+`POST /api/run` accepts `execution_mode: "fixture" | "agent"` and `method: "graph" | "flat" | "expanded_flat" | "full"`. Fixture mode reads actual Olist rows through deterministic tools. Agent mode sends only the selected method's read-only tool definitions to Groq, accepts model-chosen JSON arguments, validates dependencies and entity IDs, executes the calls against the local data store, and returns the model's answer. Provider errors do not fall back to fixture mode. The result separates retrieval, execution, and answer evaluation; outcomes are `SUCCESS`, `PARTIAL`, `FAILURE`, `BLOCKED`, or `UNVERIFIED`, with deterministic objective checks where the data supports them. Configure `GROQ_API_KEY` and optionally `GROQ_MODEL` (default `openai/gpt-oss-20b`) on the API server. `GET /api/agent/status` reports availability without exposing credentials. The deterministic evaluation makes no model calls. `POST /api/evaluate/agent` runs a sequential paired pilot (up to three cases) with request, token, and tool-call limits; each case-strategy result is checkpointed in HydraDB and can be resumed.
 
 The entity retriever extracts a 32-character Olist order ID from each request and requires both a matching SQLite row and its HydraDB entity path. Unknown IDs fail closed. Refund eligibility is a clearly labeled simulated demo policy, not an Olist policy.
 
@@ -30,7 +30,7 @@ Start the local stack with `./scripts/dev.sh`, then open [http://127.0.0.1:8000]
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The real Groq integration test runs only when `GROQ_API_KEY` is configured. The deterministic evaluation is available at `POST /api/evaluate`; `/api/learning/demo` runs the dependency evidence demonstration, and `POST /api/learning/rollback/{update_id}` rolls back its update.
+The real Groq integration test runs only when `GROQ_API_KEY` and a local HydraDB instance are available. The deterministic evaluation is available at `POST /api/evaluate`; `/api/learning/demo` runs the fixture dependency demonstration; `/api/learning/agent-demo` runs the separate real-Groq evidence, validated mutation, and held-out retest; and `POST /api/learning/rollback/{update_id}` rolls back its update.
 
 ## Data license and attribution
 
@@ -38,7 +38,7 @@ The bundled SQLite database is a 500-order subset of the [Brazilian E-Commerce P
 
 ## Limitations
 
-The nine held-out prompts are authored, descriptive cases rather than a statistically powered benchmark. Execution outcomes are deterministic over source rows; they do not establish LLM reasoning quality. The semantic baseline uses local skill candidate matching and dependency expansion, not a learned embedding model. The refund rule is simulated. Render Free storage is ephemeral. The app code is MIT licensed; HydraDB and Olist retain their separate upstream licenses.
+The authored fixture cases and the real-Groq pilot are descriptive, small samples, not statistically powered benchmarks. Real-agent results depend on Groq's model behavior and free-tier availability. The current paired pilot can pause on a provider rate limit; saved strategies are not repeated on resume. The semantic fixture baseline uses local skill candidate matching and dependency expansion, not a learned embedding model. The refund rule is simulated. Render Free storage is ephemeral. The app code is MIT licensed; HydraDB and Olist retain their separate upstream licenses.
 
 ## License
 

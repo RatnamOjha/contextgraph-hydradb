@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -23,10 +24,14 @@ from .router import candidate_skills, classify, execute_fixture, expanded_flat_r
 from .olist_store import DEFAULT_DB, available as olist_available, dataset_status, list_orders, lookup_order
 from .dataset_workflow import execute_deterministic, extract_order_id
 from .groq_agent import run_groq_agent
+from .objectives import evaluate_answer, requested_objectives
+from .real_evaluation import compare_real_agent
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("contextgraph")
 db = HydraClient()
+_learning_lock = asyncio.Lock()
+_agent_eval_lock = asyncio.Lock()
 
 
 class SeedRequest(BaseModel):
@@ -45,6 +50,14 @@ class EvalRequest(BaseModel):
     catalog_size: Literal[20, 100, 500] = 100
     iterations: int = Field(default=3, ge=1, le=6)
     real_model_cases: int = Field(default=0, ge=0, le=3)
+
+
+class AgentEvalRequest(BaseModel):
+    cases: int = Field(default=1, ge=1, le=3)
+    max_provider_requests: int = Field(default=20, ge=1, le=30)
+    max_total_tokens: int = Field(default=40000, ge=512, le=60000)
+    max_tool_calls: int = Field(default=20, ge=1, le=60)
+    resume: bool = True
 
 
 class LearningRollbackRequest(BaseModel):
@@ -309,6 +322,10 @@ async def run_dataset_task(request: RunRequest) -> dict:
             log.exception("unknown_order_trace_write_failed")
         return {"scenario": "olist_order", "task": request.task, "method": request.method,
             "execution_mode": request.execution_mode, "selected_tools": [], "paths": [], "resolved_entities": [],
+            "outcome": {"code": "BLOCKED", "explanation": "The requested Olist order ID does not resolve to a source record.", "verified_objectives": 0,
+                "total_objectives": len(requested_objectives(request.task)), "objectives": [], "unsupported_claims": [], "evidence": {}, "structured_summary": {}},
+            "execution": {"tools_exposed": [], "tools_called": [], "invalid_calls": 0, "repeated_calls": 0, "execution_failures": 0, "iterations": 0},
+            "retrieval": {"relevant_tool_coverage": {}, "dependency_complete": False, "entity_resolved": False, "context_tokens_est": 0, "retrieval_ms": 0, "objective_count": len(requested_objectives(request.task))},
             "metrics": {"task_success": False, "tool_precision": 0, "tool_recall": 0, "context_tokens_est": 0,
                 "retrieval_ms": 0, "end_to_end_ms": 0, "unnecessary_tools": 0, "tool_calls": 0,
                 "dependency_success": False, "entity_resolution_correct": False},
@@ -351,7 +368,23 @@ async def run_dataset_task(request: RunRequest) -> dict:
     context_budget = max(300, min(12000, int(os.getenv("CONTEXTGRAPH_TOOL_CONTEXT_TOKEN_BUDGET", "2500"))))
     if context_token_est > context_budget:
         raise HTTPException(413, detail=f"Retrieved context ({context_token_est} estimated tokens) exceeds the configured budget ({context_budget}); required dependencies were not dropped.")
-    agent_result = await run_groq_agent(request.task, selected, DEFAULT_DB, order_id) if request.execution_mode == "agent" else execute_deterministic(request.task, order_id, selected, DEFAULT_DB)
+    agent_error = None
+    if request.execution_mode == "agent":
+        try:
+            agent_result = await run_groq_agent(request.task, selected, DEFAULT_DB, order_id)
+        except HTTPException as exc:
+            agent_error = {"status_code": exc.status_code, "message": str(exc.detail)}
+            agent_result = {"success": False, "answer": "Groq did not complete this request. No fixture fallback was run; factual objectives remain unverified.",
+                "tool_calls": 0, "tool_outputs": [], "trace": [{"step": "groq-provider-failure", "message": str(exc.detail)}],
+                "missing_tools": [], "dependency_failures": [], "reused_entities": [],
+                "execution": {"tools_exposed": sorted(tool.key for tool in selected), "tools_called": [], "invalid_calls": 0,
+                    "repeated_calls": 0, "execution_failures": 0, "iterations": 0, "provider_error": agent_error}}
+    else:
+        agent_result = execute_deterministic(request.task, order_id, selected, DEFAULT_DB)
+    entity_match = any(row["type"] == "order" and row["id"] == order_id for row in resolved) if request.method == "graph" else lookup_order(order_id) is not None
+    outcome = evaluate_answer(request.task, agent_result["answer"], agent_result["tool_outputs"], entity_resolved=entity_match)
+    agent_result["outcome"] = outcome
+    agent_result["success"] = outcome["code"] == "SUCCESS"
     agent_result["trace"].insert(0, {"step": "task-analysis", "message": "Candidate skills: " + ", ".join(row["skill"] for row in candidates)})
     end_ms = (time.perf_counter() - started) * 1000
     try:
@@ -364,22 +397,39 @@ async def run_dataset_task(request: RunRequest) -> dict:
     for tool in selected:
         row = tool_json(tool)
         row["why"] = reasons.get(tool.key, [])
+        row["dependencies"] = list(tool.dependencies)
         row["execution_status"] = "simulated_policy" if tool.server == "contextgraph-simulated" else "dataset_backed"
         row["source"] = "ContextGraph demo policy" if tool.server == "contextgraph-simulated" else "Olist historical dataset"
         selected_json.append(row)
     expected = set(__import__("backend.dataset_workflow", fromlist=["required_tools"]).required_tools(request.task))
-    succeeded = {row["tool"] for row in agent_result["tool_outputs"] if not row.get("error")}
+    objective_providers = {"status": {"order.details", "order.delivery_status"}, "payment_total": {"order.payments"},
+        "payment_methods": {"order.payments"}, "installments": {"order.payments"}, "delivery_timing": {"order.delivery_status"},
+        "items": {"order.items"}, "seller_ids": {"order.items"}, "customer_orders": {"customer.orders"}, "purchase_date": {"order.details"},
+        "item_total": {"order.details"}, "refund_eligibility": {"refund.eligibility"}}
+    objective_rows = requested_objectives(request.task)
+    selected_keys = {tool.key for tool in selected}
+    relevant = {obj["id"]: sorted(objective_providers.get(obj["id"], set()) & selected_keys) for obj in objective_rows}
+    dependency_complete = all(set(tool.dependencies).issubset(selected_keys) for tool in selected)
+    execution = agent_result.get("execution") or {"tools_exposed": sorted(selected_keys),
+        "tools_called": sorted({row["tool"] for row in agent_result["tool_outputs"]}),
+        "tools_executed": sorted({row["tool"] for row in agent_result["tool_outputs"] if not row.get("error")}),
+        "invalid_calls": sum(1 for row in agent_result["tool_outputs"] if row.get("error")),
+        "repeated_calls": 0, "execution_failures": sum(1 for row in agent_result["tool_outputs"] if row.get("error")), "iterations": 0}
     usage = agent_result.get("agent") or {}
     return {"scenario": "olist_order", "task": request.task, "method": request.method,
-        "execution_mode": request.execution_mode, "agent": usage, "skill": [row["skill"] for row in candidates],
+        "execution_mode": request.execution_mode, "agent": usage, "agent_error": agent_error, "skill": [row["skill"] for row in candidates],
         "selected_tools": selected_json, "paths": paths, "resolved_entities": resolved,
+        "outcome": outcome, "execution": execution,
+        "retrieval": {"relevant_tool_coverage": relevant, "dependency_complete": dependency_complete,
+            "entity_resolved": entity_match, "context_tokens_est": context_token_est,
+            "retrieval_ms": round(retrieval_ms, 3), "objective_count": len(objective_rows)},
         "metrics": {"task_success": agent_result["success"], "tool_precision": round(len(expected & {t.key for t in selected}) / max(1, len(selected)), 3),
             "tool_recall": round(len(expected & {t.key for t in selected}) / max(1, len(expected)), 3),
             "context_tokens_est": context_token_est, "retrieval_ms": round(retrieval_ms, 3),
             "end_to_end_ms": round(end_ms, 3), "unnecessary_tools": len({t.key for t in selected} - expected),
             "tool_calls": agent_result["tool_calls"], "dependency_success": not agent_result["missing_tools"] and not agent_result["dependency_failures"],
             "argument_correctness": not any(row.get("error") for row in agent_result["tool_outputs"]),
-            "entity_resolution_correct": any(row["type"] == "order" and row["id"] == order_id for row in resolved),
+            "entity_resolution_correct": entity_match,
             "actual_input_tokens": usage.get("input_tokens"), "actual_output_tokens": usage.get("output_tokens")},
         "trace": agent_result["trace"], "tool_outputs": agent_result["tool_outputs"], "answer": agent_result["answer"]}
 
@@ -621,10 +671,31 @@ async def evaluate(request: EvalRequest):
         raise as_http_error(exc) from exc
 
 
+@app.post("/api/evaluate/agent")
+async def evaluate_agent(request: AgentEvalRequest):
+    """Run a sequential, budgeted same-model comparison; resume from HydraDB checkpoints."""
+    if not os.getenv("GROQ_API_KEY"):
+        raise HTTPException(503, detail="Set GROQ_API_KEY on the API server to run this real-agent pilot.")
+    async with _agent_eval_lock:
+        try:
+            return await compare_real_agent(db, case_count=request.cases,
+                max_provider_requests=request.max_provider_requests, max_total_tokens=request.max_total_tokens,
+                max_tool_calls=request.max_tool_calls, resume=request.resume)
+        except Exception as exc:
+            raise as_http_error(exc) from exc
+
+
 async def set_dependency_weight(tool_key: str, dependency_key: str, weight: float) -> None:
     tool_id = db.id_for("Tool", tool_key)
     dependency_id = db.id_for("Tool", dependency_key)
     await db.query(f"MATCH (a:Tool {{id: {tool_id}}})-[r:DEPENDS_ON]->(b:Tool {{id: {dependency_id}}}) SET r.weight = {weight:.1f}")
+
+
+async def get_dependency_weight(tool_key: str, dependency_key: str) -> float:
+    tool_id = db.id_for("Tool", tool_key)
+    dependency_id = db.id_for("Tool", dependency_key)
+    _, rows, _ = await db.query(f"MATCH (a:Tool {{id: {tool_id}}})-[r:DEPENDS_ON]->(b:Tool {{id: {dependency_id}}}) RETURN r.weight AS weight")
+    return float(rows[0][0]) if rows and rows[0][0] is not None else 0.0
 
 
 @app.post("/api/learning/demo")
@@ -633,49 +704,164 @@ async def learning_demo():
     if not olist_available(): raise HTTPException(503, detail="Import the Olist demo subset first.")
     rows = list_orders(20)
     if len(rows) < 2: raise HTTPException(503, detail="The learning demo requires two distinct source orders.")
-    training, heldout = rows[0]["order_id"], rows[1]["order_id"]
-    tool_key, dependency = "order.items", "order.details"
-    train_task = f"Identify the line-item goods and seller IDs for historical record {training}."
-    test_task = f"Which purchased goods were included in source record {heldout}?"
-    candidates = candidate_skills(train_task)
-    await set_dependency_weight(tool_key, dependency, 0.0)
-    applied = False
-    try:
-        before_route = await route_graph_candidates(db, candidates, training)
-        by_key = {tool.key: tool for tool in DATA_TOOLS}
-        before_tools = [by_key[row["key"]] for row in before_route["tools"] if row["key"] in by_key]
-        before = execute_deterministic(train_task, training, before_tools, DEFAULT_DB)
-        await record_dataset_execution(train_task, "graph:fixture:dependency-removed", before["success"], candidates,
-            [tool.key for tool in before_tools], before["tool_outputs"], before_route["resolved_entities"], 0.0, None)
-        evidence = before["dependency_failures"]
-        proposed = next(((row["tool"], row["missing_dependency"]) for row in evidence
-                         if row["tool"] == tool_key and row["missing_dependency"] == dependency), None)
-        declared = next((tool for tool in DATA_TOOLS if tool.key == tool_key), None)
-        if not proposed or not declared or dependency not in declared.dependencies:
-            raise HTTPException(409, detail={"message": "Execution evidence did not validate the missing dependency; no graph update was applied.", "evidence": evidence})
+    async with _learning_lock:
+        training, heldout = rows[0]["order_id"], rows[1]["order_id"]
+        tool_key, dependency = "order.items", "order.details"
+        train_task = f"Identify the line-item goods and seller IDs for historical record {training}."
+        test_task = f"Which purchased goods were included in source record {heldout}?"
+        candidates = candidate_skills(train_task)
+        baseline_weight = await get_dependency_weight(tool_key, dependency)
+        await set_dependency_weight(tool_key, dependency, 0.0)
+        applied = False
+        try:
+            before_route = await route_graph_candidates(db, candidates, training)
+            by_key = {tool.key: tool for tool in DATA_TOOLS}
+            before_tools = [by_key[row["key"]] for row in before_route["tools"] if row["key"] in by_key]
+            before = execute_deterministic(train_task, training, before_tools, DEFAULT_DB)
+            await record_dataset_execution(train_task, "graph:fixture:dependency-removed", before["success"], candidates,
+                [tool.key for tool in before_tools], before["tool_outputs"], before_route["resolved_entities"], 0.0, None)
+            evidence = before["dependency_failures"]
+            declared = next((tool for tool in DATA_TOOLS if tool.key == tool_key), None)
+            if not any(row.get("tool") == tool_key and row.get("missing_dependency") == dependency for row in evidence) or not declared or dependency not in declared.dependencies:
+                return {"state": "no_update", "mode": "fixture", "diagnosis": "No validated missing-dependency evidence; graph was not changed.", "evidence": evidence}
 
-        update_id = int(time.time_ns() & ((1 << 62) - 1)) or 3
-        await set_dependency_weight(tool_key, dependency, 1.0)
-        applied = True
-        await db.query("UNWIND $rows AS row MERGE (u {id: row.id}) SET u:LearningUpdate, u.tool=row.tool, u.dependency=row.dependency, u.previous_weight=row.previous_weight, u.applied_weight=row.applied_weight, u.state=row.state, u.evidence=row.evidence, u.training_order=row.training_order, u.heldout_order=row.heldout_order",
-            {"rows": [{"id": update_id, "tool": tool_key, "dependency": dependency, "previous_weight": 0.0,
-                "applied_weight": 1.0, "state": "applied", "evidence": json.dumps(evidence), "training_order": training, "heldout_order": heldout}]})
-        after_candidates = candidate_skills(test_task)
-        after_route = await route_graph_candidates(db, after_candidates, heldout)
-        after_tools = [by_key[row["key"]] for row in after_route["tools"] if row["key"] in by_key]
-        after = execute_deterministic(test_task, heldout, after_tools, DEFAULT_DB)
-        await record_dataset_execution(test_task, "graph:fixture:after-learning", after["success"], after_candidates,
-            [tool.key for tool in after_tools], after["tool_outputs"], after_route["resolved_entities"], 0.0, None)
-        return {"update_id": update_id, "training_order_id": training, "heldout_order_id": heldout,
-            "before": {"task": train_task, "success": before["success"], "selected_tools": [t.key for t in before_tools], "trace": before["trace"], "dependency_failures": evidence},
-            "proposal": {"tool": tool_key, "missing_dependency": dependency, "evidence": evidence, "validation": "matched declared tool prerequisite and observed execution dependency failure"},
-            "mutation": {"edge": f"{tool_key} -[DEPENDS_ON]-> {dependency}", "weight_before": 0.0, "weight_after": 1.0, "state": "applied"},
-            "after": {"task": test_task, "success": after["success"], "selected_tools": [t.key for t in after_tools], "trace": after["trace"], "dependency_failures": after["dependency_failures"]},
-            "heldout_is_disjoint": training != heldout, "rollback_endpoint": f"/api/learning/rollback/{update_id}"}
-    except Exception:
-        if not applied:
+            update_id = int(time.time_ns() & ((1 << 62) - 1)) or 3
             await set_dependency_weight(tool_key, dependency, 1.0)
-        raise
+            applied = True
+            await db.query("UNWIND $rows AS row MERGE (u {id: row.id}) SET u:LearningUpdate, u.tool=row.tool, u.dependency=row.dependency, u.previous_weight=row.previous_weight, u.applied_weight=row.applied_weight, u.state=row.state, u.evidence=row.evidence, u.training_order=row.training_order, u.heldout_order=row.heldout_order, u.learning_mode=row.learning_mode",
+                {"rows": [{"id": update_id, "tool": tool_key, "dependency": dependency, "previous_weight": baseline_weight,
+                    "applied_weight": 1.0, "state": "applied", "evidence": json.dumps(evidence), "training_order": training, "heldout_order": heldout, "learning_mode": "fixture"}]})
+            after_candidates = candidate_skills(test_task)
+            after_route = await route_graph_candidates(db, after_candidates, heldout)
+            after_tools = [by_key[row["key"]] for row in after_route["tools"] if row["key"] in by_key]
+            after = execute_deterministic(test_task, heldout, after_tools, DEFAULT_DB)
+            await record_dataset_execution(test_task, "graph:fixture:after-learning", after["success"], after_candidates,
+                [tool.key for tool in after_tools], after["tool_outputs"], after_route["resolved_entities"], 0.0, None)
+            return {"update_id": update_id, "mode": "fixture", "training_order_id": training, "heldout_order_id": heldout,
+                "before": {"task": train_task, "success": before["success"], "selected_tools": [t.key for t in before_tools], "trace": before["trace"], "dependency_failures": evidence},
+                "proposal": {"tool": tool_key, "missing_dependency": dependency, "evidence": evidence, "validation": "matched declared tool prerequisite and observed execution dependency failure"},
+                "mutation": {"edge": f"{tool_key} -[DEPENDS_ON]-> {dependency}", "weight_before": 0.0, "weight_after": 1.0, "baseline_weight": baseline_weight, "state": "applied"},
+                "after": {"task": test_task, "success": after["success"], "selected_tools": [t.key for t in after_tools], "trace": after["trace"], "dependency_failures": after["dependency_failures"]},
+                "heldout_is_disjoint": training != heldout, "rollback_endpoint": f"/api/learning/rollback/{update_id}"}
+        finally:
+            if not applied:
+                await set_dependency_weight(tool_key, dependency, baseline_weight)
+
+
+@app.post("/api/learning/agent-demo")
+async def agent_learning_demo():
+    """Use a real Groq run's observed dependency rejection as graph repair evidence."""
+    if not os.getenv("GROQ_API_KEY"):
+        raise HTTPException(503, detail="Real-agent learning requires GROQ_API_KEY on this server; no fixture fallback is used.")
+    if not olist_available(): raise HTTPException(503, detail="Import the Olist demo subset first.")
+    rows = list_orders(20)
+    if len(rows) < 2: raise HTTPException(503, detail="Real-agent learning requires two distinct Olist orders.")
+    async with _learning_lock:
+        training, heldout = rows[0]["order_id"], rows[1]["order_id"]
+        tool_key, dependency = "order.items", "order.details"
+        train_task = f"List line items, categories, and seller IDs for reference {training}."
+        test_task = f"Identify the goods and product categories for historical record {heldout}."
+        candidates = candidate_skills(train_task)
+        baseline_weight = await get_dependency_weight(tool_key, dependency)
+        declared = next((tool for tool in DATA_TOOLS if tool.key == tool_key), None)
+        if not declared or dependency not in declared.dependencies:
+            raise HTTPException(409, detail="The catalog no longer declares the dependency required for this controlled demonstration.")
+        await set_dependency_weight(tool_key, dependency, 0.0)
+        applied = False
+        try:
+            before_route = await route_graph_candidates(db, candidates, training)
+            by_key = {tool.key: tool for tool in DATA_TOOLS}
+            before_keys = {row["key"] for row in before_route["tools"] if row["key"] in by_key}
+            before_tools = [by_key[key] for key in sorted(before_keys)]
+            try:
+                before = await run_groq_agent(train_task, before_tools, DEFAULT_DB, training,
+                    provider_request_budget=3, tool_call_budget=4)
+            except HTTPException as exc:
+                return {"state": "provider_failure", "mode": "real_groq", "message": exc.detail,
+                    "graph_restored": True, "mutation_applied": False, "training_order_id": training,
+                    "retrieved_tools": sorted(before_keys), "retrieval_ms": before_route["retrieval_ms"]}
+            blocked = []
+            for row in before["tool_outputs"]:
+                message = str(row.get("result", {}).get("error", ""))
+                tool = by_key.get(row.get("tool"))
+                if dependency in message and tool and dependency in tool.dependencies and dependency not in before_keys:
+                    blocked.append({"tool": tool.key, "missing_dependency": dependency,
+                        "observed_error": message, "call_arguments": row.get("arguments"),
+                        "evidence_source": "real Groq-selected tool call rejected by runtime dependency validation"})
+            await record_dataset_execution(train_task, "graph:real-agent-learning:before", before["success"], candidates,
+                sorted(before_keys), before["tool_outputs"], before_route["resolved_entities"], before_route["retrieval_ms"], before.get("agent"))
+            diagnosis = "missing_dependency" if blocked else ("dataset_limitation" if before["outcome"]["total_objectives"] and all(not o["evidence_sufficient"] for o in before["outcome"]["objectives"]) else ("model_reasoning_failure" if before["tool_calls"] == 0 else "execution_or_answer_failure"))
+            if before["outcome"]["code"] == "SUCCESS":
+                diagnosis = "valid_alternative_path"
+            if not blocked:
+                return {"state": "no_update", "mode": "real_groq", "diagnosis": diagnosis,
+                    "explanation": "The real run did not produce validated evidence that this prerequisite is missing; no graph mutation was made.",
+                    "training_order_id": training, "before": before, "retrieval": {"tools": sorted(before_keys),
+                        "edges": before_route["edges"], "resolved_entities": before_route["resolved_entities"], "retrieval_ms": before_route["retrieval_ms"]},
+                    "graph_restored": True}
+
+            update_id = int(time.time_ns() & ((1 << 62) - 1)) or 3
+            await set_dependency_weight(tool_key, dependency, 1.0)
+            applied = True
+            evidence = {"training_task": train_task, "training_order_id": training,
+                "retrieved_tools_before": sorted(before_keys), "blocked_execution_calls": blocked,
+                "agent_outcome": before["outcome"], "provider": before.get("agent"),
+                "validation": "observed a real model-selected call rejected because a schema-declared prerequisite was absent from the HydraDB retrieval"}
+            await db.query("UNWIND $rows AS row MERGE (u {id: row.id}) SET u:LearningUpdate, u.tool=row.tool, u.dependency=row.dependency, u.previous_weight=row.previous_weight, u.applied_weight=row.applied_weight, u.state=row.state, u.evidence=row.evidence, u.training_order=row.training_order, u.heldout_order=row.heldout_order, u.learning_mode=row.learning_mode, u.diagnosis=row.diagnosis, u.confidence=row.confidence",
+                {"rows": [{"id": update_id, "tool": tool_key, "dependency": dependency,
+                    "previous_weight": baseline_weight, "applied_weight": 1.0, "state": "applied",
+                    "evidence": json.dumps(evidence, ensure_ascii=False), "training_order": training,
+                    "heldout_order": heldout, "learning_mode": "real_groq", "diagnosis": diagnosis,
+                    "confidence": "deterministic_schema_and_runtime_validation"}]})
+            after_candidates = candidate_skills(test_task)
+            after_route = await route_graph_candidates(db, after_candidates, heldout)
+            after_keys = {row["key"] for row in after_route["tools"] if row["key"] in by_key}
+            after_tools = [by_key[key] for key in sorted(after_keys)]
+            try:
+                after = await run_groq_agent(test_task, after_tools, DEFAULT_DB, heldout,
+                    provider_request_budget=5, tool_call_budget=4)
+            except HTTPException as exc:
+                after = {"success": False, "answer": "Held-out Groq execution did not complete: " + str(exc.detail),
+                    "tool_calls": 0, "tool_outputs": [], "trace": [{"step": "provider-failure", "message": str(exc.detail)}],
+                    "outcome": {"code": "UNVERIFIED", "explanation": "Provider failure prevented held-out verification.",
+                        "verified_objectives": 0, "total_objectives": len(requested_objectives(test_task)),
+                        "objectives": [], "unsupported_claims": [], "evidence": {}, "structured_summary": {}},
+                    "execution": {"tools_exposed": sorted(after_keys), "tools_called": [], "invalid_calls": 0,
+                        "repeated_calls": 0, "execution_failures": 0, "iterations": 0}}
+            after_outcome = evaluate_answer(test_task, after["answer"], after["tool_outputs"],
+                entity_resolved=any(x["type"] == "order" and x["id"] == heldout for x in after_route["resolved_entities"]))
+            after["outcome"] = after_outcome
+            after["success"] = after_outcome["code"] == "SUCCESS"
+            await record_dataset_execution(test_task, "graph:real-agent-learning:after", after["success"], after_candidates,
+                sorted(after_keys), after["tool_outputs"], after_route["resolved_entities"], after_route["retrieval_ms"], after.get("agent"))
+            before_context = max(1, sum(len(json.dumps(tool_json(t), separators=(",", ":"))) for t in before_tools)//4)
+            after_context = max(1, sum(len(json.dumps(tool_json(t), separators=(",", ":"))) for t in after_tools)//4)
+            return {"state": "applied", "mode": "real_groq", "update_id": update_id,
+                "training_order_id": training, "heldout_order_id": heldout, "heldout_is_disjoint": training != heldout,
+                "training_task": train_task, "heldout_task": test_task,
+                "before": {"outcome": before["outcome"], "answer": before["answer"], "execution": before.get("execution"),
+                    "trace": before["trace"], "tool_outputs": before["tool_outputs"], "retrieved_tools": sorted(before_keys),
+                    "edges": before_route["edges"], "resolved_entities": before_route["resolved_entities"],
+                    "retrieval_ms": before_route["retrieval_ms"], "context_tokens_est": before_context,
+                    "agent": before.get("agent")},
+                "diagnosis": {"cause": diagnosis, "validated": True, "evidence": blocked,
+                    "rules": ["dependency exists in declared Tool.dependencies", "real model selected dependent tool",
+                        "execution runtime rejected the call because prerequisite was not retrieved"]},
+                "proposal": {"tool": tool_key, "relationship": "DEPENDS_ON", "dependency": dependency,
+                    "confidence": "deterministic_schema_and_runtime_validation", "expected_retrieval_effect": f"Retrieving {tool_key} will also retrieve {dependency}"},
+                "mutation": {"id": update_id, "edge": f"{tool_key} -[DEPENDS_ON]-> {dependency}",
+                    "weight_before": 0.0, "weight_after": 1.0, "baseline_weight": baseline_weight,
+                    "state": "applied", "evidence_source": "real Groq execution trace"},
+                "after": {"outcome": after_outcome, "answer": after["answer"], "execution": after.get("execution"),
+                    "trace": after["trace"], "tool_outputs": after["tool_outputs"], "retrieved_tools": sorted(after_keys),
+                    "edges": after_route["edges"], "resolved_entities": after_route["resolved_entities"],
+                    "retrieval_ms": after_route["retrieval_ms"], "context_tokens_est": after_context,
+                    "agent": after.get("agent")},
+                "rollback_endpoint": f"/api/learning/rollback/{update_id}",
+                "graph_restored_to_demo_start_on_rollback": baseline_weight}
+        finally:
+            if not applied:
+                await set_dependency_weight(tool_key, dependency, baseline_weight)
 
 
 @app.post("/api/learning/rollback/{update_id}")

@@ -97,7 +97,11 @@ def execute_deterministic(task: str, order_id: str, selected: list[Any], data_pa
         if output["tool"] == "order.details" and payload:
             facts.append(f"source status {payload['status']}, {payload['item_count']} line items, total BRL {payload['total']:.2f}")
         elif output["tool"] == "order.delivery_status" and payload:
-            facts.append(f"source delivery outcome {payload['delivery_outcome']}")
+            if payload.get("delivered_at") and payload.get("estimated_at"):
+                timing = "delivered late" if payload["delivery_outcome"] == "delivered_late" else "delivered on time"
+                facts.append(f"delivery timestamps: actual {payload['delivered_at']}; estimated {payload['estimated_at']} ({timing})")
+            else:
+                facts.append("delivery timing unverified: source timestamps do not establish both actual and estimated delivery; a missing actual timestamp does not prove non-delivery")
         elif output["tool"] == "order.payments":
             rows = payload or []
             total_paid = sum(float(row["value"]) for row in rows)
