@@ -55,8 +55,8 @@ The first one-case free-tier pilot was attempted with a 20-request cap, then res
 - Offline unit suite: 14 tests passed and one live integration test skipped because this test invocation had no local HydraDB configured (15 total). The live Groq integration had passed earlier against the local HydraDB instance.
 - Python compile check and JavaScript syntax check passed.
 - Live Groq integration and real learning/rollback were verified earlier in this sprint against local HydraDB. No provider key is committed or included in this document.
-- Hosted deployment status must be checked after the final commit. The Render service only receives Groq credentials if the service owner adds the secret in Render settings.
+- Commit `297ee8a` was pushed to `main` and verified on Render. `/api/ready` and `/api/health` returned 200, the deployed OpenAPI includes `/api/evaluate/agent` and `/api/learning/agent-demo`, and a hosted fixture run verified status and payment total (`SUCCESS`, 2/2 objectives). `/api/agent/status` reports Groq available; the credential remains a server-side Render secret.
 
 ### Remaining limits
 
-The Groq comparison is currently an incomplete, single-case pilot due to free-tier rate limits; it must not be presented as evidence of comparative superiority. The deterministic Olist objective checks cover only implemented task types, and the benchmark prompts are authored rather than statistically sampled. The local Groq key is not copied into Render. The app still uses local SQLite, and Render Free filesystem state is ephemeral.
+The Groq comparison is currently an incomplete, single-case pilot due to free-tier rate limits; it must not be presented as evidence of comparative superiority. The deterministic Olist objective checks cover only implemented task types, and the benchmark prompts are authored rather than statistically sampled. The app still uses local SQLite, and Render Free filesystem state is ephemeral.
