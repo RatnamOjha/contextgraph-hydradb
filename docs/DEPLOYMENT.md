@@ -41,3 +41,15 @@ Deployment references:
 - [Render Blueprint reference](https://render.com/docs/blueprint-spec)
 
 The public free service is live at [contextgraph-demo.onrender.com](https://contextgraph-demo.onrender.com). It has no paid database or disk resource. The deployment's generated HydraDB token is stored as a Render environment secret and is not in this repository. The bundled Olist subset is licensed CC BY-NC-SA 4.0, so this public demo must remain non-commercial unless separately licensed.
+
+## Groq credential handling and status
+
+For local development, copy `.env.example` to the ignored `.env` file and set `GROQ_API_KEY` there. Do not commit `.env`, paste keys into chat, or place credentials in the frontend. `.env.example` documents variable names only.
+
+For Render, `render.yaml` declares `GROQ_API_KEY` with `sync: false` and declares the non-secret `GROQ_MODEL`. The actual key is configured outside Git in the Render service environment. As of November 15, 2026, the hosted `/api/agent/status` reported the Groq key configured, dataset present, and model `openai/gpt-oss-20b`. That endpoint only checks configuration; `provider_call_status: not_probed` is deliberate. The latest bounded comparison attempt had received Groq HTTP 429 rate limits, so successful provider calls at the time of this audit are **not verified**. We did not issue another live provider request just to check health.
+
+The API does not return the credential. It returns only the configured flag, provider/model names, dataset flag, and `not_probed` status. Provider error responses include a sanitized error category and message, never request authorization headers.
+
+## Evaluation checkpoint persistence
+
+Real-agent evaluation attempts to save immutable checkpoint revisions in HydraDB after each case-strategy pair. If the HydraDB query runtime rejects that mutation, the runner writes the snapshot atomically to the ignored `data/evaluation-checkpoints/` directory. This sidecar supports resume while the instance and filesystem remain available; Render Free storage is ephemeral, so it is not a durable replacement for a working HydraDB checkpoint write. The current local HydraDB build returned HTTP 500 for the `UNWIND/MERGE/SET` checkpoint mutation during final verification. The existing HydraDB checkpoint remains readable and is preserved.
