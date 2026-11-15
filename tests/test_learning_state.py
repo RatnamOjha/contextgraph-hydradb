@@ -198,6 +198,22 @@ class DependencyStateTests(unittest.IsolatedAsyncioTestCase):
             "baseline", "dependency_withheld_from_retrieval", "validated_correction", "heldout_retest", "rollback_verification"])
         self.assertFalse(any("SET r.weight" in query for query in fake.queries))
 
+    async def test_learning_sidecar_falls_back_when_configured_directory_is_read_only(self):
+        blocked = Path(self.state_dir.name) / "read-only"
+        fallback = Path(self.state_dir.name) / "writable-temp"
+        original_mkdir = Path.mkdir
+        def mkdir(path, *args, **kwargs):
+            if path == blocked:
+                raise PermissionError("simulated Render read-only app directory")
+            return original_mkdir(path, *args, **kwargs)
+        with patch.object(app, "_learning_state_dir", blocked), \
+             patch("backend.app.Path.mkdir", new=mkdir), \
+             patch("backend.app.tempfile.gettempdir", return_value=str(fallback)):
+            app._write_learning_state(1013, {"id": 1013, "state": "experimenting"})
+            recovered = app._read_learning_state(1013)
+        self.assertEqual(recovered, {"id": 1013, "state": "experimenting"})
+        self.assertTrue((fallback / "contextgraph-learning-updates" / "1013.json").is_file())
+
     async def test_startup_recovers_an_interrupted_withholding_experiment(self):
         fake = FakeGraphDB()
         with patch("backend.app.db", fake):

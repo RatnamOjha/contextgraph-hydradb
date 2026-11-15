@@ -7,6 +7,7 @@ import re
 import time
 import asyncio
 import hashlib
+import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -41,11 +42,23 @@ def _learning_state_path(update_id: int) -> Path:
 
 
 def _write_learning_state(update_id: int, record: dict) -> None:
-    _learning_state_dir.mkdir(parents=True, exist_ok=True)
+    global _learning_state_dir
+    payload = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
     target = _learning_state_path(update_id)
-    temporary = target.with_suffix(".tmp")
-    temporary.write_text(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
-    temporary.replace(target)
+    try:
+        _learning_state_dir.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text(payload)
+        temporary.replace(target)
+    except OSError:
+        fallback = Path(tempfile.gettempdir()) / "contextgraph-learning-updates"
+        if fallback == _learning_state_dir: raise
+        fallback.mkdir(parents=True, exist_ok=True)
+        temporary = fallback / f"{int(update_id)}.tmp"
+        target = fallback / f"{int(update_id)}.json"
+        temporary.write_text(payload)
+        temporary.replace(target)
+        _learning_state_dir = fallback
 
 
 def _read_learning_state(update_id: int) -> dict | None:
@@ -56,9 +69,13 @@ def _read_learning_state(update_id: int) -> dict | None:
 
 
 def _local_learning_experiments() -> list[dict]:
-    if not _learning_state_dir.exists(): return []
+    try:
+        if not _learning_state_dir.exists(): return []
+        paths = _learning_state_dir.glob("*.json")
+    except OSError:
+        return []
     rows = []
-    for path in _learning_state_dir.glob("*.json"):
+    for path in paths:
         try: rows.append(json.loads(path.read_text()))
         except (OSError, ValueError, TypeError): continue
     return rows
