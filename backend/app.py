@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from .fixtures import EVALUATION_CASES, SKILLS, TASKS, TRAINING_TASKS, make_catalog
-from .hydra import HydraClient, HydraError, cypher_string
+from .hydra import HydraClient, HydraError
 from .registry import inspect_tools, seed_catalog
 from .router import classify, execute_fixture, expanded_flat_retrieve, flat_retrieve, route_graph, tool_json
 
@@ -107,12 +107,23 @@ async def record_execution(scenario: str, task_text: str, method: str, success: 
     execution_id = int(time.time_ns() & ((1 << 62) - 1)) or 1
     task_id = int(time.time_ns() & ((1 << 62) - 1)) or 2
     type_id = db.id_for("TaskType", scenario)
-    query = (
-        f"CREATE (e:Execution {{id: {execution_id}, method: {cypher_string(method)}, success: {str(success).lower()}, duration_ms: {duration_ms:.3f}}})"
-        f"-[:FOR_TASK]->(t:Task {{id: {task_id}, prompt: {cypher_string(task_text)}, intent: {cypher_string(scenario)}}})"
+    await db.query(
+        "UNWIND $rows AS row MERGE (e {id: row.id}) "
+        "SET e:Execution, e.method = row.method, e.success = row.success, e.duration_ms = row.duration_ms",
+        {"rows": [{"id": execution_id, "method": method, "success": success, "duration_ms": duration_ms}]},
     )
-    await db.query(query)
-    await db.query(f"MATCH (task:Task {{id: {task_id}}}) CREATE (task)-[:CLASSIFIED_AS]->(type:TaskType {{id: {type_id}}})")
+    await db.query(
+        "UNWIND $rows AS row MERGE (t {id: row.id}) SET t:Task, t.prompt = row.prompt, t.intent = row.intent",
+        {"rows": [{"id": task_id, "prompt": task_text, "intent": scenario}]},
+    )
+    await db.query(
+        "UNWIND $rows AS row CREATE (task {id: row.src})-[:CLASSIFIED_AS]->(type {id: row.dst})",
+        {"rows": [{"src": task_id, "dst": type_id}]},
+    )
+    await db.query(
+        "UNWIND $rows AS row CREATE (e {id: row.src})-[:FOR_TASK]->(t {id: row.dst})",
+        {"rows": [{"src": execution_id, "dst": task_id}]},
+    )
     if selected:
         rows = [{"src": execution_id, "dst": db.id_for("Tool", key)} for key in selected]
         await db.query("UNWIND $rows AS row CREATE (e {id: row.src})-[:SELECTED]->(t {id: row.dst})", {"rows": rows})
