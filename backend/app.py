@@ -9,7 +9,7 @@ import asyncio
 import hashlib
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -428,7 +428,8 @@ async def run_dataset_task(request: RunRequest) -> dict:
     else:
         agent_result = execute_deterministic(request.task, order_id, selected, DEFAULT_DB)
     entity_match = any(row["type"] == "order" and row["id"] == order_id for row in resolved) if request.method == "graph" else lookup_order(order_id) is not None
-    outcome = evaluate_answer(request.task, agent_result["answer"], agent_result["tool_outputs"], entity_resolved=entity_match)
+    outcome = evaluate_answer(request.task, agent_result["answer"], agent_result["tool_outputs"],
+        entity_resolved=entity_match, fixture_mode=request.execution_mode == "fixture")
     agent_result["outcome"] = outcome
     agent_result["success"] = outcome["code"] == "SUCCESS"
     agent_result["trace"].insert(0, {"step": "task-analysis", "message": "Candidate skills: " + ", ".join(row["skill"] for row in candidates)})
@@ -735,6 +736,37 @@ def dependency_edge_id(tool_key: str, dependency_key: str) -> str:
     return f"Tool/{db.id_for('Tool', tool_key)}-[DEPENDS_ON]->Tool/{db.id_for('Tool', dependency_key)}"
 
 
+def _validate_retrieval_edge(route: dict, tool_key: str, dependency_key: str, *, expected: bool, stage: str) -> None:
+    relation_rows = [edge for edge in route.get("edges", [])
+        if edge.get("type") == "DEPENDS_ON" and edge.get("from") == tool_key and edge.get("to") == dependency_key]
+    if len(relation_rows) > 1:
+        raise HTTPException(409, detail=f"{stage} returned the dependency edge more than once; refusing to treat a duplicate route as validated.")
+    selected = {row.get("key") for row in route.get("tools", [])}
+    observed = len(relation_rows) == 1 and dependency_key in selected
+    if observed != expected:
+        state = "present" if observed else "absent"
+        wanted = "present" if expected else "absent"
+        raise HTTPException(409, detail=f"The dependency edge was {state} in {stage} retrieval; expected it to be {wanted}.")
+
+
+def _decode_edge_snapshot(value: str | dict | None) -> dict | None:
+    if isinstance(value, dict): return value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+            return decoded if isinstance(decoded, dict) else None
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _legacy_weight_snapshot(value: Any) -> dict | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        weight = float(value)
+        return {"edge_exists": True, "weight": weight, "properties": {"weight": weight}}
+    return None
+
+
 async def get_dependency_state(tool_key: str, dependency_key: str) -> dict:
     tool_id = db.id_for("Tool", tool_key)
     dependency_id = db.id_for("Tool", dependency_key)
@@ -742,29 +774,25 @@ async def get_dependency_state(tool_key: str, dependency_key: str) -> dict:
     if not rows:
         raise HTTPException(409, detail=f"Expected dependency edge {tool_key} → {dependency_key} is absent; the demo will not create or delete it.")
     if len(rows) != 1:
-        raise HTTPException(409, detail=f"Expected one dependency edge for {tool_key} → {dependency_key}, found {len(rows)}; refusing an ambiguous mutation.")
-    if rows[0][0] is None:
-        raise HTTPException(409, detail="The dependency edge has no numeric weight; exact snapshot restoration is not supported for this edge state.")
-    weight = float(rows[0][0])
+        raise HTTPException(409, detail=f"Expected one dependency edge for {tool_key} → {dependency_key}, found {len(rows)}; refusing an ambiguous relationship state.")
+    raw_weight = rows[0][0] if rows[0] else None
+    if raw_weight is None:
+        # A returned row proves the relationship exists. HydraDB projects both
+        # an absent property and a null property as None; neither is a weight.
+        return {"edge_exists": True, "weight": None, "weight_state": "absent_or_null", "properties": {}}
+    if isinstance(raw_weight, bool) or not isinstance(raw_weight, (int, float)):
+        raise HTTPException(409, detail=f"Dependency edge weight has an unsupported value ({type(raw_weight).__name__}); refusing to change or infer its state.")
+    weight = float(raw_weight)
     return {"edge_exists": True, "weight": weight, "properties": {"weight": weight}}
 
 
-async def set_dependency_weight(tool_key: str, dependency_key: str, weight: float) -> None:
-    if not isinstance(weight, (float, int)):
-        raise ValueError("Dependency weight must be numeric.")
-    tool_id = db.id_for("Tool", tool_key)
-    dependency_id = db.id_for("Tool", dependency_key)
-    await db.query(f"MATCH (a:Tool {{id: {tool_id}}})-[r:DEPENDS_ON]->(b:Tool {{id: {dependency_id}}}) SET r.weight = {float(weight):.17g}")
-
-
-async def restore_dependency_state(tool_key: str, dependency_key: str, snapshot: dict) -> dict:
+async def verify_dependency_state_unchanged(tool_key: str, dependency_key: str, snapshot: dict) -> dict:
     if not snapshot.get("edge_exists"):
         raise HTTPException(409, detail="The original dependency edge was absent; restoration would require creating a relationship, which this demo does not do.")
-    await set_dependency_weight(tool_key, dependency_key, float(snapshot["weight"]))
-    restored = await get_dependency_state(tool_key, dependency_key)
-    if restored != snapshot:
-        raise HTTPException(409, detail=f"Dependency edge restoration did not match its snapshot: expected {snapshot}, observed {restored}.")
-    return restored
+    current = await get_dependency_state(tool_key, dependency_key)
+    if current != snapshot:
+        raise HTTPException(409, detail=f"Dependency edge changed during a retrieval-only experiment: expected {snapshot}, observed {current}. No relationship write was attempted.")
+    return current
 
 
 async def create_learning_experiment(update_id: int, tool: str, dependency: str, learning_mode: str,
@@ -773,7 +801,7 @@ async def create_learning_experiment(update_id: int, tool: str, dependency: str,
     experiment_state = {**snapshot, "retrieval_exclusion": {"from": tool, "relationship_type": "DEPENDS_ON", "to": dependency}}
     record = {"id": update_id, "tool": tool, "dependency": dependency, "learning_mode": learning_mode,
         "training_order": training, "heldout_order": heldout, "edge_identifier": dependency_edge_id(tool, dependency),
-        "relationship_type": "DEPENDS_ON", "previous_weight": snapshot["weight"], "applied_weight": snapshot["weight"],
+        "relationship_type": "DEPENDS_ON", "previous_weight": snapshot.get("weight"), "applied_weight": snapshot.get("weight"),
         "pre_state": snapshot, "experiment_state": experiment_state, "state": "experimenting", "evidence": {},
         "original_task": original_task or training,
         "graph_version": hashlib.sha256(snapshot_json.encode()).hexdigest(),
@@ -781,13 +809,21 @@ async def create_learning_experiment(update_id: int, tool: str, dependency: str,
             "declared_in_tool_metadata": True}}
     _write_learning_state(update_id, record)
     try:
-        await db.query("UNWIND $rows AS row MERGE (u {id: row.id}) SET u:LearningUpdate, u.tool=row.tool, u.dependency=row.dependency, u.learning_mode=row.learning_mode, u.training_order=row.training_order, u.heldout_order=row.heldout_order, u.edge_identifier=row.edge_identifier, u.relationship_type=row.relationship_type, u.previous_weight=row.previous_weight, u.applied_weight=row.applied_weight, u.pre_state=row.pre_state, u.experiment_state=row.experiment_state, u.state=row.state, u.evidence=row.evidence, u.original_task=row.original_task, u.graph_version=row.graph_version, u.proposed_graph_correction=row.proposed_graph_correction",
-            {"rows": [{"id": update_id, "tool": tool, "dependency": dependency, "learning_mode": learning_mode,
+        fields = ["u:LearningUpdate", "u.tool=row.tool", "u.dependency=row.dependency", "u.learning_mode=row.learning_mode",
+            "u.training_order=row.training_order", "u.heldout_order=row.heldout_order", "u.edge_identifier=row.edge_identifier",
+            "u.relationship_type=row.relationship_type", "u.pre_state=row.pre_state", "u.experiment_state=row.experiment_state",
+            "u.state=row.state", "u.evidence=row.evidence", "u.original_task=row.original_task", "u.graph_version=row.graph_version",
+            "u.proposed_graph_correction=row.proposed_graph_correction"]
+        row_data = {"id": update_id, "tool": tool, "dependency": dependency, "learning_mode": learning_mode,
                 "training_order": training, "heldout_order": heldout, "edge_identifier": record["edge_identifier"],
-                "relationship_type": "DEPENDS_ON", "previous_weight": snapshot["weight"], "applied_weight": snapshot["weight"],
+                "relationship_type": "DEPENDS_ON",
                 "pre_state": snapshot_json, "experiment_state": json.dumps(experiment_state, separators=(",", ":")),
                 "state": "experimenting", "evidence": "{}", "original_task": record["original_task"],
-                "graph_version": record["graph_version"], "proposed_graph_correction": json.dumps(record["proposed_graph_correction"], separators=(",", ":"))}]})
+                "graph_version": record["graph_version"], "proposed_graph_correction": json.dumps(record["proposed_graph_correction"], separators=(",", ":"))}
+        if isinstance(snapshot.get("weight"), (int, float)) and not isinstance(snapshot.get("weight"), bool):
+            fields.extend(["u.previous_weight=row.previous_weight", "u.applied_weight=row.applied_weight"])
+            row_data.update({"previous_weight": float(snapshot["weight"]), "applied_weight": float(snapshot["weight"])})
+        await db.query("UNWIND $rows AS row MERGE (u {id: row.id}) SET " + ", ".join(fields), {"rows": [row_data]})
         _, rows, _ = await db.query("MATCH (u:LearningUpdate {id: $id}) RETURN u.tool AS tool,u.dependency AS dependency,u.pre_state AS pre_state,u.experiment_state AS experiment_state,u.state AS state,u.original_task AS original_task,u.graph_version AS graph_version,u.proposed_graph_correction AS proposed_graph_correction",
             {"id": update_id})
         if not rows or rows[0] != [tool, dependency, snapshot_json,
@@ -805,16 +841,31 @@ async def finish_learning_experiment(update_id: int, *, state: str, evidence: di
                                      diagnosis: str, post_state: dict | None = None,
                                      rollback_state: dict | None = None,
                                      retrieval_snapshot: dict | None = None,
-                                     heldout_retest: dict | None = None) -> None:
+                                     heldout_retest: dict | None = None,
+                                     rollback_verification: dict | None = None) -> None:
     record = _read_learning_state(update_id) or {"id": update_id}
     if retrieval_snapshot is not None: record["retrieval_snapshot"] = retrieval_snapshot
     if heldout_retest is not None: record["heldout_retest"] = heldout_retest
+    if rollback_verification is not None: record["rollback_verification"] = rollback_verification
     evidence_record = {"original_task": record.get("original_task"),
         "retrieval_snapshot": record.get("retrieval_snapshot") or record.get("experiment_state"),
         "actual_execution_failure": evidence, "proposed_graph_correction": record.get("proposed_graph_correction"),
         "validation_evidence": diagnosis, "correction_status": state,
         "graph_version": record.get("graph_version"), "heldout_retest": record.get("heldout_retest"),
-        "rollback_information": rollback_state or record.get("rollback_state")}
+        "rollback_information": rollback_state or record.get("rollback_state"),
+        "rollback_verification": record.get("rollback_verification")}
+    if record.get("retrieval_snapshot") and record.get("heldout_retest"):
+        retrieval = record["retrieval_snapshot"]
+        evidence_record["learning_sequence"] = [
+            {"stage": "baseline", "edge_state": record.get("pre_state"),
+                "retrieved_tools": retrieval.get("baseline_tools", [])},
+            {"stage": "dependency_withheld_from_retrieval", "retrieved_tools": retrieval.get("training_tools", []),
+                "excluded_edge": record.get("experiment_state", {}).get("retrieval_exclusion")},
+            {"stage": "validated_correction", "validated": state == "applied", "edge_state": post_state},
+            {"stage": "heldout_retest", "evidence": record["heldout_retest"]},
+            {"stage": "rollback_verification", "evidence": record.get("rollback_verification"),
+                "edge_state": rollback_state},
+        ]
     record.update({"state": state, "evidence": evidence, "evidence_record": evidence_record, "diagnosis": diagnosis,
         "post_state": post_state, "rollback_state": rollback_state, "finished_at": time.time()})
     try:
@@ -867,8 +918,11 @@ async def recover_interrupted_learning_experiments() -> None:
                 raise RuntimeError(f"Retrieval-only learning experiment {update_id} found graph drift; refusing automatic mutation.")
             restored = current
         else:
-            # Recover pre-filter experiments that used the older weight mutation.
-            restored = await restore_dependency_state(tool, dependency, snapshot)
+            # Legacy and current hosted learning records are retrieval-only too.
+            # Never repair them by writing the shared dependency edge.
+            if current != snapshot:
+                raise RuntimeError(f"Legacy learning experiment {update_id} found graph drift; refusing to mutate the shared dependency edge.")
+            restored = current
         record["pre_state"] = snapshot
         record["post_state"] = restored
         record["rollback_state"] = restored
@@ -896,15 +950,15 @@ async def learning_demo():
         test_task = f"Which purchased goods were included in source record {heldout}?"
         candidates = candidate_skills(train_task)
         baseline = await get_dependency_state(tool_key, dependency)
-        if baseline["weight"] <= 0:
-            raise HTTPException(409, detail="The dependency is already inactive; the fixture experiment requires an active baseline edge.")
+        baseline_route = await route_graph_candidates(db, candidates, training)
+        _validate_retrieval_edge(baseline_route, tool_key, dependency, expected=True, stage="baseline")
         update_id = int(time.time_ns() & ((1 << 62) - 1)) or 3
         await create_learning_experiment(update_id, tool_key, dependency, "fixture", training, heldout, baseline, train_task)
-        correction_applied = False
         finished = False
         try:
             experiment_state = {**baseline, "retrieval_exclusion": {"from": tool_key, "relationship_type": "DEPENDS_ON", "to": dependency}}
             before_route = await route_graph_candidates(db, candidates, training, exclude_dependencies={(tool_key, dependency)})
+            _validate_retrieval_edge(before_route, tool_key, dependency, expected=False, stage="dependency-withheld")
             by_key = {tool.key: tool for tool in DATA_TOOLS}
             before_tools = [by_key[row["key"]] for row in before_route["tools"] if row["key"] in by_key]
             before = execute_deterministic(train_task, training, before_tools, DEFAULT_DB)
@@ -913,52 +967,63 @@ async def learning_demo():
             evidence = before["dependency_failures"]
             declared = next((tool for tool in DATA_TOOLS if tool.key == tool_key), None)
             if not any(row.get("tool") == tool_key and row.get("missing_dependency") == dependency for row in evidence) or not declared or dependency not in declared.dependencies:
-                restored = await get_dependency_state(tool_key, dependency)
+                restored = await verify_dependency_state_unchanged(tool_key, dependency, baseline)
                 await finish_learning_experiment(update_id, state="no_update", evidence=evidence,
-                    diagnosis="No validated dependency evidence", post_state=experiment_state, rollback_state=restored)
+                    diagnosis="No validated dependency evidence", post_state=experiment_state, rollback_state=restored,
+                    rollback_verification={"verified": True, "unchanged_from_baseline": True, "edge_written": False})
                 finished = True
                 return {"state": "no_update", "mode": "fixture", "diagnosis": "No validated evidence; the dependency was restored to baseline.",
                     "evidence": evidence, "evidence_store": (_read_learning_state(update_id) or {}).get("evidence_store"),
-                    "graph_states": {"baseline": baseline, "experiment": experiment_state, "rollback": restored}}
+                    "graph_states": {"baseline": baseline, "experiment": experiment_state, "rollback": restored},
+                    "rollback_verification": {"verified": True, "unchanged_from_baseline": True, "edge_written": False}}
 
-            corrected_state = await get_dependency_state(tool_key, dependency)
+            corrected_state = await verify_dependency_state_unchanged(tool_key, dependency, baseline)
             if corrected_state != baseline:
                 raise HTTPException(409, detail="HydraDB did not confirm restoration of the dependency's baseline state.")
             await finish_learning_experiment(update_id, state="applied", evidence=evidence,
                 diagnosis="dependency_withheld_from_retrieval_then_filter_removed", post_state=corrected_state)
-            correction_applied = True
             after_candidates = candidate_skills(test_task)
             after_route = await route_graph_candidates(db, after_candidates, heldout)
+            _validate_retrieval_edge(after_route, tool_key, dependency, expected=True, stage="held-out retest")
             after_tools = [by_key[row["key"]] for row in after_route["tools"] if row["key"] in by_key]
             after = execute_deterministic(test_task, heldout, after_tools, DEFAULT_DB)
             await record_learning_execution(test_task, "graph:fixture:after-learning", after["success"], after_candidates,
                 [tool.key for tool in after_tools], after["tool_outputs"], after_route["resolved_entities"], 0.0, None)
+            rollback_state = await verify_dependency_state_unchanged(tool_key, dependency, baseline)
+            rollback_verification = {"verified": True, "edge_exists": rollback_state["edge_exists"],
+                "unchanged_from_baseline": rollback_state == baseline, "edge_written": False,
+                "semantics": "The retrieval-only experiment left the persisted relationship unchanged."}
             await finish_learning_experiment(update_id, state="applied", evidence=evidence,
                 diagnosis="controlled_dependency_recovery_filter_removed", post_state=corrected_state,
-                retrieval_snapshot={"training_tools": [tool.key for tool in before_tools], "edges": before_route["edges"],
+                retrieval_snapshot={"baseline_tools": [row["key"] for row in baseline_route["tools"]],
+                    "baseline_edges": baseline_route["edges"], "training_tools": [tool.key for tool in before_tools], "edges": before_route["edges"],
                     "resolved_entities": before_route["resolved_entities"]},
                 heldout_retest={"task": test_task, "order_id": heldout, "success": after["success"],
-                    "selected_tools": [tool.key for tool in after_tools], "tool_outputs": after["tool_outputs"]})
+                    "selected_tools": [tool.key for tool in after_tools], "tool_outputs": after["tool_outputs"],
+                    "edges": after_route["edges"]}, rollback_state=rollback_state,
+                rollback_verification=rollback_verification)
             finished = True
             return {"state": "applied", "update_id": update_id, "mode": "fixture", "training_order_id": training, "heldout_order_id": heldout,
                 "evidence_store": (_read_learning_state(update_id) or {}).get("evidence_store"),
                 "before": {"task": train_task, "success": before["success"], "selected_tools": [t.key for t in before_tools], "trace": before["trace"], "dependency_failures": evidence},
                 "proposal": {"tool": tool_key, "relationship": "DEPENDS_ON", "dependency": dependency, "evidence": evidence,
                     "validation": "matched declared tool prerequisite and observed fixture execution dependency failure"},
-                "mutation": {"id": update_id, "edge_identifier": dependency_edge_id(tool_key, dependency),
+                "relationship_experiment": {"id": update_id, "edge_identifier": dependency_edge_id(tool_key, dependency),
                     "edge": f"{tool_key} -[DEPENDS_ON]-> {dependency}", "relationship_type": "DEPENDS_ON",
                     "properties_before": baseline["properties"], "properties_experiment": experiment_state["properties"],
                     "properties_after": corrected_state["properties"], "state": "applied",
-                    "semantics": "Existing edge stayed unchanged in HydraDB. The experiment passed an explicit retrieval filter that withheld this edge for one route; correction removed that filter."},
-                "graph_states": {"baseline": baseline, "experiment": experiment_state, "after_correction": corrected_state},
+                    "semantics": "Retrieval-filter demonstration only: the persisted relationship was not mutated. One route excluded it; correction removed the request-scoped filter."},
+                "graph_states": {"baseline": baseline, "experiment": experiment_state, "after_correction": corrected_state,
+                    "rollback": rollback_state}, "rollback_verification": rollback_verification,
+                "retrieval_states": {"baseline": baseline_route, "withheld": before_route, "heldout_retest": after_route},
                 "after": {"task": test_task, "success": after["success"], "selected_tools": [t.key for t in after_tools], "trace": after["trace"], "dependency_failures": after["dependency_failures"]},
                 "heldout_is_disjoint": training != heldout, "rollback_endpoint": f"/api/learning/rollback/{update_id}"}
         finally:
-            if not correction_applied:
-                restored = await get_dependency_state(tool_key, dependency)
-                if not finished:
-                    await finish_learning_experiment(update_id, state="interrupted_restored", evidence=[],
-                        diagnosis="fixture_experiment_did_not_complete", rollback_state=restored)
+            if not finished:
+                restored = await verify_dependency_state_unchanged(tool_key, dependency, baseline)
+                await finish_learning_experiment(update_id, state="interrupted_restored", evidence=[],
+                    diagnosis="fixture_experiment_did_not_complete", rollback_state=restored,
+                    rollback_verification={"verified": True, "unchanged_from_baseline": True, "edge_written": False})
 
 
 @app.post("/api/learning/agent-demo")
@@ -976,19 +1041,19 @@ async def agent_learning_demo():
         test_task = f"Identify the goods and product categories for historical record {heldout}."
         candidates = candidate_skills(train_task)
         baseline = await get_dependency_state(tool_key, dependency)
-        if baseline["weight"] <= 0:
-            raise HTTPException(409, detail="The dependency is already inactive; the real-agent experiment requires an active baseline edge.")
+        baseline_route = await route_graph_candidates(db, candidates, training)
+        _validate_retrieval_edge(baseline_route, tool_key, dependency, expected=True, stage="baseline")
         declared = next((tool for tool in DATA_TOOLS if tool.key == tool_key), None)
         if not declared or dependency not in declared.dependencies:
             raise HTTPException(409, detail="The catalog no longer declares the dependency required for this controlled demonstration.")
         update_id = int(time.time_ns() & ((1 << 62) - 1)) or 3
         await create_learning_experiment(update_id, tool_key, dependency, "real_groq", training, heldout, baseline, train_task)
-        correction_applied = False
         finished = False
         experiment_state = None
         try:
             experiment_state = {**baseline, "retrieval_exclusion": {"from": tool_key, "relationship_type": "DEPENDS_ON", "to": dependency}}
             before_route = await route_graph_candidates(db, candidates, training, exclude_dependencies={(tool_key, dependency)})
+            _validate_retrieval_edge(before_route, tool_key, dependency, expected=False, stage="dependency-withheld")
             by_key = {tool.key: tool for tool in DATA_TOOLS}
             before_keys = {row["key"] for row in before_route["tools"] if row["key"] in by_key}
             before_tools = [by_key[key] for key in sorted(before_keys)]
@@ -996,10 +1061,11 @@ async def agent_learning_demo():
                 before = await run_groq_agent(train_task, before_tools, DEFAULT_DB, training,
                     provider_request_budget=3, tool_call_budget=4)
             except HTTPException as exc:
-                restored = await get_dependency_state(tool_key, dependency)
+                restored = await verify_dependency_state_unchanged(tool_key, dependency, baseline)
                 await finish_learning_experiment(update_id, state="provider_failure", evidence=[],
                     diagnosis=str(getattr(exc, "provider_error", {}).get("kind", "provider_error")),
-                    post_state=experiment_state, rollback_state=restored)
+                    post_state=experiment_state, rollback_state=restored,
+                    rollback_verification={"verified": True, "unchanged_from_baseline": True, "edge_written": False})
                 finished = True
                 return {"state": "provider_failure", "mode": "real_groq", "message": exc.detail,
                     "provider_error": getattr(exc, "provider_error", None), "graph_restored": True,
@@ -1007,7 +1073,8 @@ async def agent_learning_demo():
                     "evidence_store": (_read_learning_state(update_id) or {}).get("evidence_store"),
                     "retrieved_tools": sorted(before_keys), "retrieval_ms": before_route["retrieval_ms"],
                     "graph_states": {"baseline": baseline, "experiment": experiment_state, "rollback": restored},
-                    "mutation": {"id": update_id, "edge_identifier": dependency_edge_id(tool_key, dependency),
+                    "rollback_verification": {"verified": True, "unchanged_from_baseline": True, "edge_written": False},
+                    "relationship_experiment": {"id": update_id, "edge_identifier": dependency_edge_id(tool_key, dependency),
                         "relationship_type": "DEPENDS_ON", "properties_before": baseline["properties"],
                         "properties_experiment": experiment_state["properties"], "properties_after": None}}
             blocked = []
@@ -1024,9 +1091,10 @@ async def agent_learning_demo():
             if before["outcome"]["code"] == "SUCCESS":
                 diagnosis = "valid_alternative_path"
             if not blocked:
-                restored = await get_dependency_state(tool_key, dependency)
+                restored = await verify_dependency_state_unchanged(tool_key, dependency, baseline)
                 await finish_learning_experiment(update_id, state="no_update", evidence=before["tool_outputs"],
-                    diagnosis=diagnosis, post_state=experiment_state, rollback_state=restored)
+                    diagnosis=diagnosis, post_state=experiment_state, rollback_state=restored,
+                    rollback_verification={"verified": True, "unchanged_from_baseline": True, "edge_written": False})
                 finished = True
                 return {"state": "no_update", "mode": "real_groq", "diagnosis": diagnosis,
                     "explanation": "The real run did not produce validated evidence that this prerequisite is missing; no graph mutation was made.",
@@ -1034,7 +1102,8 @@ async def agent_learning_demo():
                     "training_order_id": training, "before": before, "retrieval": {"tools": sorted(before_keys),
                         "edges": before_route["edges"], "resolved_entities": before_route["resolved_entities"], "retrieval_ms": before_route["retrieval_ms"]},
                     "graph_restored": True, "graph_states": {"baseline": baseline, "experiment": experiment_state, "rollback": restored},
-                    "mutation": {"id": update_id, "edge_identifier": dependency_edge_id(tool_key, dependency),
+                    "rollback_verification": {"verified": True, "unchanged_from_baseline": True, "edge_written": False},
+                    "relationship_experiment": {"id": update_id, "edge_identifier": dependency_edge_id(tool_key, dependency),
                         "relationship_type": "DEPENDS_ON", "properties_before": baseline["properties"],
                         "properties_experiment": experiment_state["properties"], "properties_after": None}}
 
@@ -1047,9 +1116,9 @@ async def agent_learning_demo():
                 "validation": "observed a real model-selected call rejected because a schema-declared prerequisite was absent from the HydraDB retrieval"}
             await finish_learning_experiment(update_id, state="applied", evidence=evidence,
                 diagnosis="dependency_withheld_from_retrieval_then_filter_removed", post_state=corrected_state)
-            correction_applied = True
             after_candidates = candidate_skills(test_task)
             after_route = await route_graph_candidates(db, after_candidates, heldout)
+            _validate_retrieval_edge(after_route, tool_key, dependency, expected=True, stage="held-out retest")
             after_keys = {row["key"] for row in after_route["tools"] if row["key"] in by_key}
             after_tools = [by_key[key] for key in sorted(after_keys)]
             try:
@@ -1069,12 +1138,19 @@ async def agent_learning_demo():
             after["success"] = after_outcome["code"] == "SUCCESS"
             await record_learning_execution(test_task, "graph:real-agent-learning:after", after["success"], after_candidates,
                 sorted(after_keys), after["tool_outputs"], after_route["resolved_entities"], after_route["retrieval_ms"], after.get("agent"))
+            rollback_state = await verify_dependency_state_unchanged(tool_key, dependency, baseline)
+            rollback_verification = {"verified": True, "edge_exists": rollback_state["edge_exists"],
+                "unchanged_from_baseline": rollback_state == baseline, "edge_written": False,
+                "semantics": "The retrieval-only experiment left the persisted relationship unchanged."}
             await finish_learning_experiment(update_id, state="applied", evidence=evidence,
                 diagnosis="controlled_dependency_recovery_filter_removed", post_state=corrected_state,
-                retrieval_snapshot={"training_tools": sorted(before_keys), "edges": before_route["edges"],
+                retrieval_snapshot={"baseline_tools": [row["key"] for row in baseline_route["tools"]],
+                    "baseline_edges": baseline_route["edges"], "training_tools": sorted(before_keys), "edges": before_route["edges"],
                     "resolved_entities": before_route["resolved_entities"]},
                 heldout_retest={"task": test_task, "order_id": heldout, "outcome": after_outcome,
-                    "retrieved_tools": sorted(after_keys), "tool_outputs": after["tool_outputs"]})
+                    "retrieved_tools": sorted(after_keys), "tool_outputs": after["tool_outputs"],
+                    "edges": after_route["edges"]}, rollback_state=rollback_state,
+                rollback_verification=rollback_verification)
             before_context = max(1, sum(len(json.dumps(tool_json(t), separators=(",", ":"))) for t in before_tools)//4)
             after_context = max(1, sum(len(json.dumps(tool_json(t), separators=(",", ":"))) for t in after_tools)//4)
             finished = True
@@ -1092,27 +1168,29 @@ async def agent_learning_demo():
                         "execution runtime rejected the call because prerequisite was not retrieved"]},
                 "proposal": {"tool": tool_key, "relationship": "DEPENDS_ON", "dependency": dependency,
                     "confidence": "deterministic_schema_and_runtime_validation", "expected_retrieval_effect": f"Retrieving {tool_key} will also retrieve {dependency}"},
-                "mutation": {"id": update_id, "edge_identifier": dependency_edge_id(tool_key, dependency),
+                "relationship_experiment": {"id": update_id, "edge_identifier": dependency_edge_id(tool_key, dependency),
                     "edge": f"{tool_key} -[DEPENDS_ON]-> {dependency}", "relationship_type": "DEPENDS_ON",
                     "properties_before": baseline["properties"], "properties_experiment": experiment_state["properties"],
                     "properties_after": corrected_state["properties"], "state": "applied",
-                    "semantics": "Existing edge stayed unchanged in HydraDB. The experiment passed an explicit retrieval filter that withheld this edge for one route; correction removed that filter. No edge write was performed.",
+                    "semantics": "Retrieval-filter demonstration only: the persisted relationship was not mutated. One route excluded it; correction removed the request-scoped filter. No edge write was performed.",
                     "evidence_source": "real Groq execution trace"},
-                "graph_states": {"baseline": baseline, "experiment": experiment_state, "after_correction": corrected_state},
+                "graph_states": {"baseline": baseline, "experiment": experiment_state, "after_correction": corrected_state,
+                    "rollback": rollback_state}, "rollback_verification": rollback_verification,
+                "retrieval_states": {"baseline": baseline_route, "withheld": before_route, "heldout_retest": after_route},
                 "after": {"outcome": after_outcome, "answer": after["answer"], "execution": after.get("execution"),
                     "trace": after["trace"], "tool_outputs": after["tool_outputs"], "retrieved_tools": sorted(after_keys),
                     "edges": after_route["edges"], "resolved_entities": after_route["resolved_entities"],
                     "retrieval_ms": after_route["retrieval_ms"], "context_tokens_est": after_context,
                     "agent": after.get("agent")},
                 "rollback_endpoint": f"/api/learning/rollback/{update_id}",
-                "graph_restored_to_demo_start_on_rollback": baseline["weight"]}
+                "graph_restored_to_demo_start_on_rollback": baseline}
         finally:
-            if not correction_applied:
-                restored = await get_dependency_state(tool_key, dependency)
-                if not finished:
-                    await finish_learning_experiment(update_id, state="interrupted_restored", evidence=[],
-                        diagnosis="real_agent_experiment_did_not_complete", post_state=experiment_state,
-                        rollback_state=restored)
+            if not finished:
+                restored = await verify_dependency_state_unchanged(tool_key, dependency, baseline)
+                await finish_learning_experiment(update_id, state="interrupted_restored", evidence=[],
+                    diagnosis="real_agent_experiment_did_not_complete", post_state=experiment_state,
+                    rollback_state=restored,
+                    rollback_verification={"verified": True, "unchanged_from_baseline": True, "edge_written": False})
 
 
 @app.post("/api/learning/rollback/{update_id}")
@@ -1127,8 +1205,10 @@ async def rollback_learning(update_id: int):
             local = _read_learning_state(update_id)
             if rows:
                 tool, dependency, previous, applied, pre_json, post_json, state, edge_id, evidence_json = rows[0]
-                before = json.loads(pre_json) if pre_json else {"edge_exists": True, "weight": float(previous), "properties": {"weight": float(previous)}}
-                expected_after = json.loads(post_json) if post_json else {"edge_exists": True, "weight": float(applied), "properties": {"weight": float(applied)}}
+                before = _decode_edge_snapshot(pre_json) or _decode_edge_snapshot((local or {}).get("pre_state")) or _legacy_weight_snapshot(previous)
+                expected_after = _decode_edge_snapshot(post_json) or _decode_edge_snapshot((local or {}).get("post_state")) or _decode_edge_snapshot((local or {}).get("rollback_state")) or _legacy_weight_snapshot(applied) or before
+                if before is None or expected_after is None:
+                    raise HTTPException(409, detail="Learning update has no recoverable edge snapshot; refusing to infer a missing weight or apply a rollback.")
                 record_store = "HydraDB"
                 local = local or {"id": update_id, "tool": tool, "dependency": dependency, "previous_weight": previous,
                     "applied_weight": applied, "pre_state": before, "post_state": expected_after, "state": state,
@@ -1136,8 +1216,10 @@ async def rollback_learning(update_id: int):
                     "evidence_record": json.loads(evidence_json) if evidence_json else {}}
             elif local:
                 tool, dependency, state, edge_id = local.get("tool"), local.get("dependency"), local.get("state"), local.get("edge_identifier")
-                before = local.get("pre_state") or {"edge_exists": True, "weight": float(local["previous_weight"]), "properties": {"weight": float(local["previous_weight"])}}
-                expected_after = local.get("post_state") or local.get("rollback_state") or before
+                before = _decode_edge_snapshot(local.get("pre_state")) or _legacy_weight_snapshot(local.get("previous_weight"))
+                expected_after = _decode_edge_snapshot(local.get("post_state")) or _decode_edge_snapshot(local.get("rollback_state")) or _legacy_weight_snapshot(local.get("applied_weight")) or before
+                if before is None or expected_after is None:
+                    raise HTTPException(409, detail="Learning update has no recoverable edge snapshot; refusing to infer a missing weight or apply a rollback.")
                 record_store = local.get("evidence_store", "local_sidecar")
             else:
                 raise HTTPException(404, detail="Learning update was not found.")
@@ -1172,7 +1254,7 @@ async def rollback_learning(update_id: int):
             return {"update_id": update_id, "state": "rolled_back", "edge": f"{tool} -[DEPENDS_ON]-> {dependency}",
                 "edge_identifier": edge_id or dependency_edge_id(tool, dependency), "relationship_type": "DEPENDS_ON",
                 "properties_before": expected_after.get("properties"), "properties_after": restored.get("properties"),
-                "restored_weight": restored["weight"], "restored_state": restored, "edge_written": False,
+                "restored_weight": restored.get("weight"), "restored_state": restored, "edge_written": False,
                 "rollback_semantics": "Verified unchanged against the captured pre-experiment graph state; no dependency edge write was made.",
                 "evidence_store": record_store}
     except HTTPException:

@@ -14,8 +14,8 @@ def requested_objectives(task: str) -> list[dict[str, str]]:
 
     if re.search(r"\b(status|state)\b", text): add("status", "Order status")
     has_payment = bool(re.search(r"\b(payment|payments|paid|charge|transaction|installment|money trail)\b", text))
-    if has_payment and re.search(r"\b(total|amount|value|reconcile|money)\b", text): add("payment_total", "Payment total")
-    if has_payment and re.search(r"\b(method|type|kind|payment types)\b", text): add("payment_methods", "Payment method")
+    if has_payment and re.search(r"\b(total|amounts?|values?|reconcile|money)\b", text): add("payment_total", "Payment values / total")
+    if has_payment and re.search(r"\b(methods?|types?|kinds?|payment types)\b", text): add("payment_methods", "Payment methods")
     if has_payment and re.search(r"\b(installment|installments)\b", text): add("installments", "Installments")
     if re.search(r"\b(total|order value)\b", text) and not has_payment: add("item_total", "Item total (price + freight)")
     if re.search(r"\b(delivery|delivered|shipment|shipping|carrier|parcel)\b", text) and re.search(r"\b(time|timing|date|late|promised|arrive|arrived|timestamp|timeline|when)\b", text):
@@ -49,12 +49,18 @@ def evidence_from_outputs(outputs: list[dict[str, Any]]) -> dict[str, dict[str, 
             "tool": "order.delivery_status", "sufficient": bool(actual and estimated),
             "source": "Olist delivery and estimated timestamps"}
     if isinstance(payments, list):
-        values = [float(row["value"]) for row in payments if isinstance(row, dict) and row.get("value") is not None]
-        kinds = sorted({str(row["kind"]) for row in payments if isinstance(row, dict) and row.get("kind")})
-        installments = sorted({int(row["installments"]) for row in payments if isinstance(row, dict) and row.get("installments") is not None})
-        facts["payment_total"] = {"value": round(sum(values), 2), "tool": "order.payments", "sufficient": bool(payments), "source": "Sum of Olist payment records"}
-        facts["payment_methods"] = {"value": kinds, "tool": "order.payments", "sufficient": bool(kinds), "source": "Olist payment records"}
-        facts["installments"] = {"value": installments, "tool": "order.payments", "sufficient": bool(installments), "source": "Olist payment records"}
+        rows = [row for row in payments if isinstance(row, dict)]
+        values = [float(row["value"]) for row in rows if row.get("value") is not None]
+        kinds = sorted({str(row["kind"]) for row in rows if row.get("kind")})
+        installments = sorted({int(row["installments"]) for row in rows if row.get("installments") is not None})
+        facts["payment_total"] = {"value": round(sum(values), 2), "tool": "order.payments",
+            "record_values": values, "sufficient": bool(rows) and len(values) == len(rows), "source": "Sum of Olist payment records"}
+        facts["payment_methods"] = {"value": kinds, "tool": "order.payments",
+            "sufficient": bool(rows) and len(kinds) > 0 and all(row.get("kind") for row in rows),
+            "payment_count": len(rows), "method_count": len(kinds), "source": "Olist payment records"}
+        facts["installments"] = {"value": installments, "tool": "order.payments",
+            "sufficient": bool(rows) and len(installments) > 0 and all(row.get("installments") is not None for row in rows),
+            "source": "Olist payment records"}
     items = by_tool.get("order.items")
     if isinstance(items, list):
         facts["items"] = {"value": items, "tool": "order.items", "sufficient": bool(items) or items == [], "source": "Olist line item records"}
@@ -100,7 +106,8 @@ def _decimal_amount(raw: str) -> Decimal:
     return Decimal(raw).quantize(Decimal("0.01"))
 
 
-def _answers_objective(key: str, answer: str, fact: dict[str, Any] | None) -> tuple[bool, bool | None, Any, str]:
+def _answers_objective(key: str, answer: str, fact: dict[str, Any] | None, *,
+                       verify_payment_multiplicity: bool = False) -> tuple[bool, bool | None, Any, str]:
     if not fact or not fact.get("sufficient"):
         return False, None, None, "No sufficient source evidence was returned."
     text = _norm(answer)
@@ -129,10 +136,28 @@ def _answers_objective(key: str, answer: str, fact: dict[str, Any] | None) -> tu
             pattern = r"\b" + re.escape(_norm(method)).replace(r"\ ", r"\s+") + r"\b"
             if re.search(pattern, text): mentions.append(method)
         if not mentions: return False, None, None, "Answer did not name a source payment method."
-        return True, set(map(_norm, mentions)) == set(map(_norm, methods)), mentions, "Compared named methods with source payment rows."
+        method_match = set(map(_norm, mentions)) == set(map(_norm, methods))
+        if not verify_payment_multiplicity:
+            return True, method_match, mentions, "Compared named methods with source payment rows."
+        count = fact.get("payment_count")
+        multiple_payments_stated = bool(re.search(r"\b(?:\d+|multiple|several)\s+payment\s+(?:records?|transactions?)\b", text))
+        one_payment_stated = bool(re.search(r"\b1\s+payment\s+(?:record|transaction)\b|\bone payment\b", text))
+        payment_count_match = (multiple_payments_stated if count and count > 1 else one_payment_stated) if count is not None else True
+        method_count = fact.get("method_count")
+        if method_count == 1:
+            method_count_stated = bool(re.search(r"\b(?:only one|one|single) payment method\b", text))
+        elif method_count and method_count > 1:
+            method_count_stated = bool(re.search(r"\b(?:multiple|more than one|different) payment methods\b", text))
+        else:
+            method_count_stated = False
+        correct = method_match and payment_count_match and method_count_stated
+        detail = "Compared named methods and payment/method counts with source payment rows."
+        if not payment_count_match or not method_count_stated:
+            detail = "Named methods must also state whether the source has one or multiple payment records and methods."
+        return True, correct, {"methods": mentions, "payment_count": count, "method_count": method_count}, detail
     if key == "installments":
         expected = set(value or [])
-        nums = {int(x) for x in re.findall(r"\b(\d{1,2})\s*(?:installments?|payments?)\b", text)}
+        nums = {int(x) for x in re.findall(r"\b(\d{1,2})\s*installments?\b", text)}
         if not nums: return False, None, None, "Answer did not state an installment count."
         return True, nums == expected, sorted(nums), "Compared installment counts with source payment rows."
     if key == "delivery_timing":
@@ -188,13 +213,15 @@ def _answers_objective(key: str, answer: str, fact: dict[str, Any] | None) -> tu
 
 
 def evaluate_answer(task: str, answer: str, outputs: list[dict[str, Any]], *, entity_resolved: bool = True,
-                    retrieval_ms: float | None = None, context_tokens: int | None = None) -> dict[str, Any]:
+                    retrieval_ms: float | None = None, context_tokens: int | None = None,
+                    fixture_mode: bool = False) -> dict[str, Any]:
     objectives = requested_objectives(task)
     facts = evidence_from_outputs(outputs)
     scored = []
     for objective in objectives:
         fact = facts.get(objective["id"])
-        answered, correct, answer_value, reason = _answers_objective(objective["id"], answer, fact)
+        answered, correct, answer_value, reason = _answers_objective(objective["id"], answer, fact,
+            verify_payment_multiplicity=fixture_mode)
         scored.append({**objective, "answered": answered, "factually_correct": correct,
             "evidence_sufficient": bool(fact and fact.get("sufficient")), "supporting_tool": fact.get("tool") if fact else None,
             "evidence_source": fact.get("source") if fact else None,
@@ -203,13 +230,15 @@ def evaluate_answer(task: str, answer: str, outputs: list[dict[str, Any]], *, en
     unsupported = []
     amounts = _amounts(answer)
     supported_amounts = {Decimal(str(f["value"])).quantize(Decimal("0.01")) for f in facts.values() if f.get("value") is not None and isinstance(f.get("value"), (int,float))}
+    supported_payment_values = {Decimal(str(value)).quantize(Decimal("0.01")) for value in facts.get("payment_total", {}).get("record_values", [])}
     for match in re.finditer(r"(?:R\$|BRL|\$)\s*([0-9,]+(?:\.[0-9]{1,2})?)|([0-9,]+(?:\.[0-9]{1,2})?)\s*(?:BRL|reais)", answer, re.I):
         try: amount = _decimal_amount(match.group(1) or match.group(2) or "")
         except InvalidOperation: continue
         context = answer[max(0, match.start()-45):min(len(answer), match.end()+25)].lower()
         payment_claim = bool(re.search(r"payment|paid|charge|transaction", context))
         payment_fact = facts.get("payment_total")
-        supported = (payment_fact and payment_fact.get("sufficient") and amount == Decimal(str(payment_fact["value"])).quantize(Decimal("0.01"))) if payment_claim else amount in supported_amounts
+        is_record_value = bool(re.search(r"payment\s+record\s+\d+|payment\s+value", context))
+        supported = (payment_fact and payment_fact.get("sufficient") and amount == Decimal(str(payment_fact["value"])).quantize(Decimal("0.01"))) if payment_claim and not is_record_value else amount in supported_payment_values if payment_claim else amount in supported_amounts
         if not supported:
             unsupported.append({"type": "currency_amount", "claim": str(amount), "reason": "No returned Olist tool result supports this currency amount in the stated context."})
     status_fact = facts.get("status")

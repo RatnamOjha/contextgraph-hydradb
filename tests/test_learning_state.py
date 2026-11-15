@@ -34,8 +34,8 @@ class FakeGraphDB:
         if "MERGE (u {id: row.id})" in query:
             for row in params["rows"]:
                 self.updates[row["id"]] = {
-                    "tool": row["tool"], "dependency": row["dependency"], "previous_weight": row["previous_weight"],
-                    "applied_weight": row["previous_weight"], "pre_state": row["pre_state"],
+                    "tool": row["tool"], "dependency": row["dependency"], "previous_weight": row.get("previous_weight"),
+                    "applied_weight": row.get("applied_weight"), "pre_state": row["pre_state"],
                     "experiment_state": row["experiment_state"], "edge_identifier": row["edge_identifier"],
                     "state": row["state"], "evidence": row["evidence"], "relationship_type": row["relationship_type"],
                     "original_task": row["original_task"], "graph_version": row["graph_version"],
@@ -121,6 +121,82 @@ class DependencyStateTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(HTTPException) as duplicate:
                 await app.get_dependency_state("order.items", "order.details")
         self.assertEqual(duplicate.exception.status_code, 409)
+
+    async def test_weightless_edge_is_distinct_from_missing_relationship(self):
+        fake = FakeGraphDB(weights=(None,))
+        with patch("backend.app.db", fake):
+            state = await app.get_dependency_state("order.items", "order.details")
+        self.assertEqual(state, {"edge_exists": True, "weight": None, "weight_state": "absent_or_null", "properties": {}})
+        self.assertNotIn("weight", state["properties"])
+        self.assertNotIn("SET r.weight", "\n".join(fake.queries))
+
+    async def test_weightless_edge_snapshot_persists_and_rollback_only_verifies_it(self):
+        fake = FakeGraphDB(weights=(None,))
+        with patch("backend.app.db", fake):
+            baseline = await app.get_dependency_state("order.items", "order.details")
+            await app.create_learning_experiment(1011, "order.items", "order.details", "fixture", "train", "heldout", baseline)
+            record = app._read_learning_state(1011)
+            self.assertEqual(record["pre_state"], baseline)
+            create_query = next(query for query in fake.queries if "MERGE (u {id: row.id})" in query)
+            self.assertNotIn("row.previous_weight", create_query)
+            self.assertNotIn("row.applied_weight", create_query)
+            self.assertNotIn("u.previous_weight=row.previous_weight", create_query)
+            self.assertNotIn("u.applied_weight=row.applied_weight", create_query)
+            await app.finish_learning_experiment(1011, state="applied", evidence={"validated": True},
+                diagnosis="retrieval_filter_removed", post_state=baseline, rollback_state=baseline,
+                rollback_verification={"verified": True, "edge_written": False})
+            result = await app.rollback_learning(1011)
+        self.assertEqual(result["state"], "rolled_back")
+        self.assertIsNone(result["restored_weight"])
+        self.assertEqual(result["restored_state"], baseline)
+        self.assertFalse(result["edge_written"])
+        self.assertFalse(any("SET r.weight" in query for query in fake.queries))
+
+    async def test_weightless_interrupted_recovery_verifies_without_edge_write(self):
+        fake = FakeGraphDB(weights=(None,))
+        with patch("backend.app.db", fake):
+            baseline = await app.get_dependency_state("order.items", "order.details")
+            await app.create_learning_experiment(1012, "order.items", "order.details", "fixture", "train", "heldout", baseline)
+            await app.recover_interrupted_learning_experiments()
+            restored = await app.get_dependency_state("order.items", "order.details")
+        self.assertEqual(restored, baseline)
+        self.assertEqual(fake.updates[1012]["state"], "interrupted_restored")
+        self.assertFalse(any("SET r.weight" in query for query in fake.queries))
+
+    async def test_fixture_endpoint_records_weightless_retrieval_sequence_and_rollback(self):
+        fake = FakeGraphDB(weights=(None,))
+        baseline = {"edge_exists": True, "weight": None, "weight_state": "absent_or_null", "properties": {}}
+        def route(withheld=False):
+            tools = [{"key": "order.items"}]
+            edges = [{"from": "product_research", "to": "order.items", "type": "USES"}]
+            if not withheld:
+                tools.append({"key": "order.details"})
+                edges.append({"from": "order.items", "to": "order.details", "type": "DEPENDS_ON"})
+            return {"tools": tools, "edges": edges, "resolved_entities": [], "retrieval_ms": 1.0}
+        routes = [route(), route(withheld=True), route()]
+        executions = [
+            {"success": False, "answer": "blocked", "tool_calls": 1, "tool_outputs": [], "trace": [],
+                "dependency_failures": [{"tool": "order.items", "missing_dependency": "order.details"}]},
+            {"success": True, "answer": "verified", "tool_calls": 2, "tool_outputs": [], "trace": [],
+                "dependency_failures": []},
+        ]
+        with patch("backend.app.db", fake), patch("backend.app.olist_available", return_value=True), \
+             patch("backend.app.list_orders", return_value=[{"order_id": "train"}, {"order_id": "heldout"}]), \
+             patch("backend.app.route_graph_candidates", side_effect=routes), \
+             patch("backend.app.execute_deterministic", side_effect=executions), \
+             patch("backend.app.record_learning_execution", new=AsyncMock()), \
+             patch("backend.app._learning_state_dir", Path(self.state_dir.name)):
+            result = await app.learning_demo()
+        self.assertEqual(result["state"], "applied")
+        self.assertEqual(result["graph_states"]["baseline"], baseline)
+        self.assertEqual(result["graph_states"]["rollback"], baseline)
+        self.assertTrue(result["rollback_verification"]["verified"])
+        self.assertFalse(result["rollback_verification"]["edge_written"])
+        record = app._read_learning_state(result["update_id"])
+        timeline = record["evidence_record"]["learning_sequence"]
+        self.assertEqual([row["stage"] for row in timeline], [
+            "baseline", "dependency_withheld_from_retrieval", "validated_correction", "heldout_retest", "rollback_verification"])
+        self.assertFalse(any("SET r.weight" in query for query in fake.queries))
 
     async def test_startup_recovers_an_interrupted_withholding_experiment(self):
         fake = FakeGraphDB()
