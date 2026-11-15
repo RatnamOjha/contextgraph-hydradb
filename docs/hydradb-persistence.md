@@ -18,6 +18,8 @@ A parameter value of `null` is not supported. A minimal property update with nul
 {"error":{"code":"invalid_parameter","message":"parameter $value must contain booleans, signed or unsigned integers, finite floats, strings, lists, or string-keyed maps"}}
 ```
 
+Assigning a list-valued row property to a node field also returned HTTP 400 (`{"error":{"code":"invalid_request","message":"OpenCypher query is not supported yet: UNWIND row 0 field dependencies must be scalar"}}`). The isolated graph harness now retains minimal probes for literal `UNWIND SET` and `null` parameters so these engine constraints stay visible in repeatable verification.
+
 Learning updates now omit absent properties from the `SET` clause. Relationship creation with `UNWIND ... CREATE`, node `UNWIND ... MERGE ... SET`, node property updates with `MATCH ... SET`, and relationship property updates with `MATCH ... SET` were exercised against the isolated runtime; all successful writes were read back. The accepted checkpoint and result shapes use row-map assignments throughout.
 
 The pre-existing populated local store returned HTTP 500 for minimal supported node, relationship, and checkpoint writes, with the generic sanitized response:
@@ -40,7 +42,18 @@ A simulated 500 after a successful mocked provider response was tested: resume p
 
 `LearningUpdate` records contain the original task, training and held-out order IDs, an edge snapshot hash (`graph_version`), retrieved-context snapshot, actual failure evidence, proposed relationship, metadata validation, correction status, held-out retest, and rollback information. Create, final update, and rollback markers are read back from HydraDB. A local JSON sidecar remains a recovery convenience only and is ephemeral on Render Free.
 
-The existing demo is controlled dependency recovery: it withholds an existing `DEPENDS_ON` edge with a request-scoped retrieval filter and then removes the filter. It does not mutate the graph. The product runtime's auth principal denied writes to a new named graph with HTTP 403 `permission_denied`, so a product-level isolated graph-learning run was not performed. No genuine graph-learning claim or corrected-graph result is reported. The fixture path remains deterministic; the real-agent path remains a separate Groq workflow.
+The existing API demo is controlled dependency recovery: it withholds an existing `DEPENDS_ON` edge with a request-scoped retrieval filter and then removes the filter. It does not mutate the graph. A separate local-only harness, `scripts/graph_learning_experiment.py --heldout 3`, starts a fresh HydraDB process with a temporary store, creates a tool graph genuinely missing the edge, runs the deterministic Olist tool workflow, validates the proposed edge against declared `Tool.dependencies`, writes and reads back the relationship, runs held-out tasks using the corrected graph, deletes the relationship, and verifies the original graph snapshot. The product runtime's auth principal denied writes to a new named graph with HTTP 403 `permission_denied`, so this path runs in its own isolated HydraDB process and is not exposed as a shared Render operation. The prerequisite was validated from metadata; it was not autonomously discovered. The real-agent path remains a separate Groq workflow.
+
+The latest isolated run used training order `54282e97f61c23b78330c15b154c867d` and three distinct held-out orders: `35a972d7f8436f405b56e36add1a7140`, `03ef5dedbe7492bdae72eec50764c43f`, and `168626408cb32af0ffaf76711caae1dc`.
+
+| Method | Held-out verified completion | Dependency failures | Tool calls | Mean context estimate |
+|---|---:|---:|---:|---:|
+| Initial graph, missing edge | 0/3 | 3 | 0 | 90 tokens |
+| Corrected graph, persisted edge | 3/3 | 0 | 6 | 182 tokens |
+| Flat lexical retrieval | 3/3 | 0 | 6 | 356 tokens |
+| Flat with dependency expansion | 3/3 | 0 | 6 | 356 tokens |
+
+One correction was validated, with zero regressions. The edge was deleted and readback confirmed the initial graph snapshot. This is deterministic Olist execution, not a Groq result. The harness and its test use temporary stores and make zero model calls.
 
 ## Deterministic Olist baseline
 
