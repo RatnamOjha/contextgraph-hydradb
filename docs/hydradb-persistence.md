@@ -10,6 +10,15 @@ The exact `LearningUpdate` creation query failed on a fresh isolated store with 
 {"error":{"code":"invalid_request","message":"OpenCypher query is not supported yet: UNWIND vertex SET values must read fields from the row map"}}
 ```
 
+The sanitized query shape was:
+
+```cypher
+UNWIND $rows AS row
+MERGE (u {id: row.id})
+SET u:LearningUpdate, u.tool=row.tool, u.relationship_type='DEPENDS_ON',
+    u.state='experimenting', u.evidence='{}'
+```
+
 The cause was literal property assignments inside `UNWIND ... SET` (`state='experimenting'`, `evidence='{}'`, and `relationship_type='DEPENDS_ON'`). The legacy parser requires every assigned value to read from the current row map. Moving these values into row fields made the write return HTTP 200 and allowed exact readback.
 
 A parameter value of `null` is not supported. A minimal property update with null returned HTTP 400:
@@ -22,7 +31,23 @@ Assigning a list-valued row property to a node field also returned HTTP 400 (`{"
 
 Learning updates now omit absent properties from the `SET` clause. Relationship creation with `UNWIND ... CREATE`, node `UNWIND ... MERGE ... SET`, node property updates with `MATCH ... SET`, and relationship property updates with `MATCH ... SET` were exercised against the isolated runtime; all successful writes were read back. The accepted checkpoint and result shapes use row-map assignments throughout.
 
-The pre-existing populated local store returned HTTP 500 for minimal supported node, relationship, and checkpoint writes, with the generic sanitized response:
+The pre-existing populated local store returned HTTP 500 for these minimal supported write shapes (using unique probe IDs and scalar parameters):
+
+```cypher
+UNWIND $rows AS row
+MERGE (n {id: row.id})
+SET n:PersistenceProbe, n.label=row.label
+
+UNWIND $rows AS row
+CREATE (a {id: row.src})-[:PersistenceProbeRel]->(b {id: row.dst})
+
+UNWIND $rows AS row
+MERGE (c {id: row.id})
+SET c:EvaluationCheckpoint, c.run_id=row.run_id, c.revision=row.revision,
+    c.state=row.state, c.updated_at=row.updated_at, c.payload=row.payload
+```
+
+Each returned the same generic sanitized response:
 
 ```text
 {"error":{"code":"internal","message":"internal query execution error"}}
