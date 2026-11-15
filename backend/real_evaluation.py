@@ -29,6 +29,19 @@ def _checkpoint_file(run_id: str) -> Path:
     return root / f"{run_id}.json"
 
 
+def _local_applied_learning_updates() -> list[tuple[int, str, str]]:
+    root = Path(os.getenv("CONTEXTGRAPH_LEARNING_STATE_DIR", "data/learning-updates"))
+    updates = []
+    if not root.exists(): return updates
+    for path in root.glob("*.json"):
+        try: record = json.loads(path.read_text())
+        except (OSError, ValueError, TypeError): continue
+        if record.get("state") == "applied" and record.get("learning_mode") == "real_groq":
+            if record.get("tool") and record.get("dependency"):
+                updates.append((int(record["id"]), record["tool"], record["dependency"]))
+    return updates
+
+
 async def _load_checkpoint(db, run_id: str) -> dict[str, Any] | None:
     candidates = []
     path = _checkpoint_file(run_id)
@@ -199,8 +212,13 @@ async def compare_real_agent(db, *, case_count: int = 1, max_provider_requests: 
     orders = list_orders(200)
     heldout = orders[2:2+case_count]
     if len(heldout) < case_count: raise RuntimeError("Not enough frozen held-out Olist orders.")
-    applied_rows = await db.query("MATCH (u:LearningUpdate {state: 'applied', learning_mode: 'real_groq'}) RETURN u.id AS update_id,u.tool AS tool, u.dependency AS dependency")
-    learning_updates = sorted((int(i), a, b) for i,a,b in applied_rows[1] if a and b)
+    try:
+        applied_rows = await db.query("MATCH (u:LearningUpdate {state: 'applied', learning_mode: 'real_groq'}) RETURN u.id AS update_id,u.tool AS tool, u.dependency AS dependency")
+        graph_updates = [(int(i), a, b) for i,a,b in applied_rows[1] if a and b]
+    except Exception as exc:
+        log.warning("HydraDB learning-state read failed; using local records: %s", type(exc).__name__)
+        graph_updates = []
+    learning_updates = sorted(set(graph_updates + _local_applied_learning_updates()))
     learned_edges = {(a,b) for _,a,b in learning_updates}
     if not learned_edges:
         raise RuntimeError("Run the Real Agent Learning Demonstration first; graph-after-learning is not yet available.")

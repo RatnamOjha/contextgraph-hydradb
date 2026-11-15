@@ -1,6 +1,8 @@
 import json
 import re
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
@@ -55,6 +57,13 @@ class FakeGraphDB:
 
 
 class DependencyStateTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.state_dir.cleanup)
+        self.state_patch = patch.object(app, "_learning_state_dir", Path(self.state_dir.name))
+        self.state_patch.start()
+        self.addCleanup(self.state_patch.stop)
+
     async def test_withhold_restore_and_rollback_preserve_existing_relationship(self):
         fake = FakeGraphDB()
         with patch("backend.app.db", fake):
@@ -138,6 +147,29 @@ class DependencyStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({row["key"] for row in normal["tools"]}, {"order.items", "order.details"})
         self.assertEqual({row["key"] for row in withheld["tools"]}, {"order.items"})
         self.assertTrue(all(query.lstrip().startswith("MATCH") for query in db.queries))
+
+    async def test_learning_record_falls_back_and_rolls_back_without_edge_writes(self):
+        class ReadOnlyDB:
+            def __init__(self): self.queries = []
+            @staticmethod
+            def id_for(kind, key): return 1 if key == "order.items" else 2
+            async def query(self, query, params=None):
+                self.queries.append(query)
+                if "RETURN r.weight AS weight" in query:
+                    return ["weight"], [[1.0]], 0.1
+                raise RuntimeError("writer not available")
+
+        db = ReadOnlyDB()
+        with patch("backend.app.db", db):
+            baseline = await app.get_dependency_state("order.items", "order.details")
+            await app.create_learning_experiment(1010, "order.items", "order.details", "fixture", "train", "heldout", baseline)
+            await app.finish_learning_experiment(1010, state="applied", evidence={"validated": True},
+                diagnosis="retrieval_filter_removed", post_state=baseline)
+            result = await app.rollback_learning(1010)
+        self.assertEqual(result["state"], "rolled_back")
+        self.assertEqual(result["evidence_store"], "local_sidecar")
+        self.assertEqual(result["restored_state"], baseline)
+        self.assertFalse(any("SET r.weight" in query for query in db.queries))
 
 
 if __name__ == "__main__":
