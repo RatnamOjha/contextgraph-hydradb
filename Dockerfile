@@ -11,6 +11,8 @@ RUN python3 -m venv /opt/contextgraph-venv && \
     /opt/contextgraph-venv/bin/pip install --no-cache-dir -r requirements.txt
 COPY backend ./backend
 COPY web ./web
+COPY data/olist_demo.sqlite ./data/olist_demo.sqlite
+COPY data/README.md ./data/README.md
 COPY scripts/render_free_entrypoint.py /usr/local/bin/render-free-entrypoint.py
 ENV PYTHONPATH=/app PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 ENTRYPOINT ["python3", "/usr/local/bin/render-free-entrypoint.py"]

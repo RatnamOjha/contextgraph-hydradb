@@ -5,8 +5,9 @@ from collections import defaultdict
 import json
 from typing import Any
 
-from .fixtures import CORE_TOOLS, SERVERS, SKILLS, TASKS, Tool, make_catalog
+from .fixtures import SERVERS, SKILLS, TASKS, Tool, make_catalog
 from .hydra import HydraClient
+from .olist_store import DEFAULT_DB, available, connect
 
 
 def node(kind: str, key: str, **props: Any) -> dict[str, Any]:
@@ -20,7 +21,7 @@ def relationship(src_kind: str, src: str, dst_kind: str, dst: str, **props: Any)
 async def seed_catalog(db: HydraClient, size: int = 20, reset: bool = True) -> dict[str, int]:
     catalog = make_catalog(size)
     if reset:
-        for label in ("Execution", "TaskType", "Agent", "Skill", "Tool", "MCPServer", "Entity", "Task"):
+        for label in ("Execution", "LearningUpdate", "TaskType", "Agent", "Skill", "Tool", "MCPServer", "Entity", "Task"):
             await db.query(f"MATCH (n:{label}) DETACH DELETE n")
 
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -44,7 +45,7 @@ async def seed_catalog(db: HydraClient, size: int = 20, reset: bool = True) -> d
             grouped["Entity"].append(node("Entity", entity_key, entity_type=entity_kind, external_id=entity_key.split(":", 1)[1], name=entity_kind.title()))
             edges["OPERATES_ON"].append(relationship("Tool", tool.key, "Entity", entity_key))
         for dep in tool.dependencies:
-            edges["DEPENDS_ON"].append(relationship("Tool", tool.key, "Tool", dep))
+            edges["DEPENDS_ON"].append(relationship("Tool", tool.key, "Tool", dep, weight=1.0))
 
     tool_keys = {tool.key for tool in catalog}
     for scenario, fixture in TASKS.items():
@@ -93,9 +94,51 @@ async def seed_catalog(db: HydraClient, size: int = 20, reset: bool = True) -> d
             skill_id = HydraClient.id_for("Skill", skill)
             await db.query(f"MATCH (t:TaskType {{id: {task_id}}})-[r:REQUIRES]->(s:Skill {{id: {skill_id}}}) SET r.weight = 1.0")
 
+    data_graph = await seed_olist_entities(db, DEFAULT_DB) if available(DEFAULT_DB) else {"entities": 0, "entity_edges": 0}
+
     # Add an Agent -> Skill -> Tool -> MCP sample path as the model's front door.
     # Agent -> skill edges are already registered above.
-    return {"tools": len(catalog), "skills": len(SKILLS), "servers": len(SERVERS), "task_types": len(TASKS), "nodes": sum(map(len, grouped.values())), "relationship_types": len(edges)}
+    return {"tools": len(catalog), "skills": len(SKILLS), "servers": len(SERVERS), "task_types": len(TASKS), "nodes": sum(map(len, grouped.values())) + data_graph["entities"], "relationship_types": len(edges), **data_graph}
+
+
+async def seed_olist_entities(db: HydraClient, path=DEFAULT_DB, limit: int = 1000) -> dict[str, int]:
+    """Seed only anonymized IDs and Olist relationships; facts stay in SQLite."""
+    with connect(path) as conn:
+        orders = [dict(r) for r in conn.execute("SELECT order_id,customer_id FROM orders ORDER BY order_id LIMIT ?", (limit,))]
+        order_ids = [r["order_id"] for r in orders]
+        customers = {r["customer_id"]: r["customer_unique_id"] for r in conn.execute("SELECT customer_id,customer_unique_id FROM customers")}
+        placeholders = ",".join("?" for _ in order_ids)
+        items = [dict(r) for r in conn.execute(f"SELECT order_id,item_no,product_id,seller_id FROM order_items WHERE order_id IN ({placeholders})", order_ids)] if order_ids else []
+    nodes: dict[str, dict] = {}
+    links: dict[str, list[dict]] = defaultdict(list)
+    for order in orders:
+        oid, cid = order["order_id"], order["customer_id"]
+        customer_ref = customers.get(cid)
+        nodes[f"order:{oid}"] = node("Entity", f"order:{oid}", entity_type="order", external_id=oid, name="Olist order", source="olist")
+        if customer_ref:
+            nodes[f"customer:{customer_ref}"] = node("Entity", f"customer:{customer_ref}", entity_type="customer", external_id=customer_ref, name="Anonymized Olist customer", source="olist")
+            links["BELONGS_TO"].append(relationship("Entity", f"order:{oid}", "Entity", f"customer:{customer_ref}"))
+    for item in items:
+        item_key = f"item:{item['order_id']}:{item['item_no']}"
+        product_key, seller_key = f"product:{item['product_id']}", f"seller:{item['seller_id']}"
+        nodes[item_key] = node("Entity", item_key, entity_type="order_item", external_id=f"{item['order_id']}:{item['item_no']}", name="Olist order item", source="olist")
+        nodes[product_key] = node("Entity", product_key, entity_type="product", external_id=item["product_id"], name="Olist product", source="olist")
+        nodes[seller_key] = node("Entity", seller_key, entity_type="seller", external_id=item["seller_id"], name="Olist seller", source="olist")
+        links["HAS_ITEM"].append(relationship("Entity", f"order:{item['order_id']}", "Entity", item_key))
+        links["ITEM_PRODUCT"].append(relationship("Entity", item_key, "Entity", product_key))
+        links["SOLD_BY"].append(relationship("Entity", item_key, "Entity", seller_key))
+    rows = list(nodes.values())
+    for offset in range(0, len(rows), 250):
+        chunk = rows[offset:offset + 250]
+        await db.query("UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Entity, n.key=row.key, n.entity_type=row.entity_type, n.external_id=row.external_id, n.name=row.name, n.source=row.source", {"rows": chunk})
+    edge_count = 0
+    for rel, links_rows in links.items():
+        unique = {(r["src"], r["dst"]): r for r in links_rows}
+        rows = list(unique.values())
+        for offset in range(0, len(rows), 250):
+            await db.query(f"UNWIND $rows AS row CREATE (a {{id: row.src}})-[:{rel}]->(b {{id: row.dst}})", {"rows": rows[offset:offset + 250]})
+        edge_count += len(rows)
+    return {"entities": len(nodes), "entity_edges": edge_count}
 
 
 async def inspect_tools(db: HydraClient) -> list[dict[str, Any]]:

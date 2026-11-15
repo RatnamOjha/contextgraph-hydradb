@@ -5,7 +5,7 @@ import re
 import time
 from typing import Any
 
-from .fixtures import TASKS, Tool, make_catalog
+from .fixtures import CORE_TOOLS, DATA_TOOLS, SKILLS, TASKS, Tool, make_catalog
 from .hydra import HydraClient, cypher_string
 
 
@@ -48,6 +48,104 @@ def expanded_flat_retrieve(text: str, catalog: list[Tool], limit: int = 5) -> li
 
 def tool_json(tool: Tool) -> dict[str, Any]:
     return {"key": tool.key, "name": tool.name, "description": tool.description, "server": tool.server, "skill": tool.skill, "input_schema": tool.input_schema}
+
+
+SKILL_TERMS = {
+    "customer_context": {"customer", "shopper", "buyer", "account", "orders", "history", "purchases", "who", "belongs"},
+    "order_support": {"order", "purchase", "total", "details", "status"},
+    "billing_review": {"payment", "payments", "charge", "charged", "paid", "installments", "transaction", "amount", "money"},
+    "delivery_investigation": {"delivery", "delivered", "shipment", "shipping", "late", "arrived", "carrier", "estimated", "received", "parcel"},
+    "product_research": {"product", "products", "category", "seller", "merchant", "weight", "item", "items", "line", "lines", "goods"},
+    "refund_review": {"refund", "eligible", "eligibility", "return", "reimburse", "policy"},
+}
+
+
+def candidate_skills(text: str, limit: int = 3) -> list[dict[str, Any]]:
+    """Local semantic-ish candidate generation, shared by graph and flat routes."""
+    words = terms(text)
+    scores = []
+    for skill, vocabulary in SKILL_TERMS.items():
+        matched = sorted(words & vocabulary)
+        if matched:
+            scores.append({"skill": skill, "score": len(matched), "evidence": matched})
+    scores.sort(key=lambda row: (-row["score"], row["skill"]))
+    if not scores and re.search(r"\b[0-9a-f]{32}\b", text, re.I):
+        scores = [{"skill": "order_support", "score": 1, "evidence": ["order identifier"]}]
+    return scores[:limit]
+
+
+def flat_candidates(task: str, candidates: list[dict[str, Any]], expand: bool = False) -> list[Tool]:
+    pool = [tool for tool in DATA_TOOLS if tool.skill in {row["skill"] for row in candidates}]
+    return expanded_flat_retrieve(task, pool, limit=4) if expand else flat_retrieve(task, pool, limit=6)
+
+
+async def route_graph_candidates(db: HydraClient, candidates: list[dict[str, Any]], order_id: str | None = None, max_depth: int = 6,
+                                exclude_dependencies: set[tuple[str, str]] | None = None) -> dict[str, Any]:
+    """HydraDB skill roots plus bounded, cycle-safe transitive tool closure."""
+    if not candidates:
+        return {"skills": [], "tools": [], "edges": [], "resolved_entities": [], "retrieval_ms": 0.0}
+    start = time.perf_counter()
+    skill_ids = [db.id_for("Skill", row["skill"]) for row in candidates]
+    ids = ",".join(str(i) for i in skill_ids)
+    _, roots, _ = await db.query(
+        f"MATCH (s:Skill)-[:USES]->(t:Tool) WHERE s.id IN [{ids}] OPTIONAL MATCH (t)-[:PROVIDED_BY]->(m:MCPServer) "
+        "RETURN DISTINCT s.key AS skill,t.id AS id,t.key AS key,t.name AS name,t.description AS description,t.server AS server,t.schema AS schema,m.key AS mcp ORDER BY key"
+    )
+    chosen: dict[int, dict[str, Any]] = {}
+    edges: list[dict[str, str]] = []
+    for skill, ident, key, name, description, server, schema, mcp in roots:
+        ident = int(ident)
+        if ident in chosen:
+            chosen[ident]["root_skills"].append(skill)
+        else:
+            chosen[ident] = {"id": ident, "key": key, "name": name, "description": description, "server": server, "schema": schema, "mcp": mcp, "root_skills": [skill]}
+        edges.append({"from": skill, "to": key, "type": "USES"})
+        if mcp: edges.append({"from": key, "to": mcp, "type": "PROVIDED_BY"})
+    frontier, visited = set(chosen), set(chosen)
+    for _ in range(max_depth):
+        if not frontier: break
+        ids = ",".join(str(i) for i in sorted(frontier))
+        excluded = "".join(f" AND NOT (a.key = '{a}' AND b.key = '{b}')" for a,b in sorted(exclude_dependencies or set()))
+        _, rows, _ = await db.query(
+            f"MATCH (a:Tool)-[r:DEPENDS_ON]->(b:Tool) WHERE a.id IN [{ids}] AND (r.weight IS NULL OR r.weight > 0){excluded} "
+            "OPTIONAL MATCH (b)-[:PROVIDED_BY]->(m:MCPServer) "
+            "RETURN a.id AS src_id,a.key AS src,b.id AS id,b.key AS key,b.name AS name,b.description AS description,b.server AS server,b.schema AS schema,m.key AS mcp ORDER BY key"
+        )
+        next_frontier = set()
+        for src_id, src, ident, key, name, description, server, schema, mcp in rows:
+            ident, src_id = int(ident), int(src_id)
+            edges.append({"from": src, "to": key, "type": "DEPENDS_ON"})
+            if ident not in chosen:
+                chosen[ident] = {"id": ident, "key": key, "name": name, "description": description, "server": server, "schema": schema, "mcp": mcp, "root_skills": []}
+            if ident not in visited: next_frontier.add(ident)
+        visited.update(next_frontier); frontier = next_frontier
+    resolved = []
+    if order_id:
+        order_node = db.id_for("Entity", f"order:{order_id}")
+        _, entity_rows, _ = await db.query(
+            f"MATCH (o:Entity {{id: {order_node}}})-[:BELONGS_TO]->(c:Entity) "
+            "OPTIONAL MATCH (o)-[:HAS_ITEM]->(i:Entity)-[:ITEM_PRODUCT]->(p:Entity) "
+            "OPTIONAL MATCH (i)-[:SOLD_BY]->(s:Entity) "
+            "RETURN o.external_id AS order,c.external_id AS customer,p.external_id AS product,s.external_id AS seller"
+        )
+        if entity_rows:
+            vals = entity_rows[0]
+            resolved.append({"type": "order", "id": vals[0]})
+            if vals[1]: resolved.append({"type": "customer", "id": vals[1]})
+            for row in entity_rows:
+                if row[2]: resolved.append({"type": "product", "id": row[2]})
+                if row[3]: resolved.append({"type": "seller", "id": row[3]})
+            unique = {(r["type"], r["id"]): r for r in resolved}
+            resolved = list(unique.values())
+            edges.append({"from": f"order:{order_id}", "to": f"customer:{vals[1]}", "type": "BELONGS_TO"})
+    candidate_map = {row["skill"]: row for row in candidates}
+    for tool in chosen.values():
+        root_skills = tool["root_skills"]
+        tool["why"] = [f"Skill {skill} matched task terms: {', '.join(candidate_map[skill]['evidence'])}" for skill in root_skills if skill in candidate_map]
+        if not root_skills:
+            parents = [edge["from"] for edge in edges if edge["to"] == tool["key"] and edge["type"] == "DEPENDS_ON"]
+            tool["why"] = [f"Required dependency of {parent}" for parent in parents]
+    return {"skills": candidates, "tools": list(chosen.values()), "edges": edges, "resolved_entities": resolved, "retrieval_ms": (time.perf_counter()-start)*1000}
 
 
 async def route_graph(db: HydraClient, scenario: str, task_text: str = "") -> dict[str, Any]:
@@ -161,7 +259,7 @@ def execute_fixture(scenario: str, method: str, tool_keys: set[str], resolved: l
     calls = 0
     completed = set(reused)
     dependency_failures: list[str] = []
-    dependencies = {tool.key: tool.dependencies for tool in make_catalog(18)}
+    dependencies = {tool.key: tool.dependencies for tool in CORE_TOOLS}
     tool_results = {
         "ticket.lookup": {"ticket_id": fixture["ticket"], "customer_id": fixture["customer"], "issue": "refund request / order support"},
         "customer.resolve": {"customer_id": fixture["customer"], "canonical": True},

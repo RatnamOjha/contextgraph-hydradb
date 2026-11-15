@@ -12,3 +12,7 @@ services:
         generateValue: true
       - key: CONTEXTGRAPH_CATALOG_SIZE
         value: "100"
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-20b
+      - key: GROQ_API_KEY
+        sync: false

@@ -1,113 +1,45 @@
 # ContextGraph
 
-**Give agents hundreds of tools without putting hundreds of definitions in every prompt.** ContextGraph routes support tasks through a live HydraDB graph to retrieve the right skill, MCP tools, tool dependencies, and previously resolved entities.
+**More tools. Smaller agent context.** ContextGraph stores skills, tools, dependencies, entity links, and execution evidence in HydraDB, then retrieves a task-specific tool set for an agent. This hackathon demo uses historical Brazilian e-commerce data from Olist.
 
-This is a Track 2 Agent Context Layer MVP built on the open-source HydraDB engine. It is not a client for HydraDB's hosted platform. The detailed source review and actual local persistence proof are in [docs/HYDRADB_PHASE0.md](docs/HYDRADB_PHASE0.md).
+## Demo
 
-## Live demo
+[Open ContextGraph](https://contextgraph-demo.onrender.com). The Render Blueprint is configured for the Free plan. Free services sleep when idle and use ephemeral local storage, so the graph is reseeded after restart. The bundled SQLite demo subset is included in the image.
 
-[Open ContextGraph](https://contextgraph-demo.onrender.com). It runs on Render's Free plan and rebuilds its 100-tool demo graph after sleep or restart; first request after idle may take about a minute.
+The dashboard has three views: a graph-routed order workflow with deterministic fixture and real Groq agent modes; a dependency failure, evidence validation, graph update, held-out retest, and rollback; and a searchable tool registry. The held-out comparison reports graph, lexical, dependency-expanded, semantic candidate, graph-learning-disabled, and full-context methods case by case.
 
-## What works
+### Execution modes
 
-- HydraDB owns the context graph and all graph traversal and feedback updates.
-- The registry contains realistic MCP tool names, descriptions, input schemas, servers, skills, dependencies, and resolved ticket/customer/order entities.
-- The router reads weighted `TaskType → Skill` paths, then traverses `USES`, `DEPENDS_ON`, and `PROVIDED_BY` edges with a visited set and a four-hop dependency cap.
-- A deterministic local runtime executes tools and returns traceable outputs without an LLM key.
-- Full context, flat keyword retrieval, a HydraDB label-scan ablation, and HydraDB traversal share the same catalog and task fixtures.
-- The feedback evaluation has distinct training and held-out prompts. It resets graph weights before each run, reports accuracy/task success/recall by iteration, and keeps evaluation tasks out of feedback updates.
-- The UI shows live query paths, tool definitions, tool outputs, retrieval latency, end-to-end latency, estimated context tokens, and learning results.
-- Execution, task, selected-tool, and reused-entity records are persisted in HydraDB.
+`POST /api/run` accepts `execution_mode: "fixture" | "agent"` and `method: "graph" | "flat" | "expanded_flat" | "full"`. Fixture mode reads actual Olist rows through deterministic tools. Agent mode sends the graph-retrieved read-only tool definitions to Groq, accepts model-chosen JSON arguments, validates dependencies and entity IDs, executes the calls against the local data store, and returns the model's answer. Provider errors do not fall back to fixture mode. Configure `GROQ_API_KEY` and optionally `GROQ_MODEL` (default `openai/gpt-oss-20b`) on the API server. `GET /api/agent/status` reports availability without exposing credentials. The optional real-model evaluation is limited to three cases; the default nine-case evaluation makes no model calls.
 
-## Start locally
+The entity retriever extracts a 32-character Olist order ID from each request and requires both a matching SQLite row and its HydraDB entity path. Unknown IDs fail closed. Refund eligibility is a clearly labeled simulated demo policy, not an Olist policy.
 
-Requirements: Rust 1.99+, a C/C++ build toolchain, SuiteSparse:GraphBLAS, `libcypher-parser`, and Python 3.10+. On macOS, the upstream project documents Homebrew setup:
+## Local setup
+
+Python 3.10+ and the dependencies in `requirements.txt` are required. A local HydraDB server is also required; the project documents its checked-out upstream source and supported query path in [docs/HYDRADB_PHASE0.md](docs/HYDRADB_PHASE0.md). Set `HYDRADB_URL` as needed. Copy `.env.example` to `.env`, then set `GROQ_API_KEY` locally if you want real-agent mode. Keep the key out of source control and chat.
+
+Import the official Olist archive into the documented 500-order subset:
 
 ```bash
-brew install just cmake pkg-config llvm suite-sparse
-brew install cleishm/neo4j/libcypher-parser
+python scripts/import_olist.py --archive data/raw/olist.zip --output data/olist_demo.sqlite --orders 500
 ```
 
-Then start the entire local stack:
-
-```bash
-./scripts/dev.sh
-```
-
-The script clones `hydra-db/hydradb` into the ignored `hydradb-upstream/` folder if missing, builds `graph-node`, starts a local filesystem object store, installs the Python environment, seeds a 100-tool catalog, and runs the initial feedback evaluation. Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Press Ctrl-C to stop both processes. Data persists in `.hydradb/store`; logs are in `.hydradb/logs`.
-
-To change the initial catalog size, set `CONTEXTGRAPH_CATALOG_SIZE=20`, `100`, or `500`. The HydraDB and API port variables can be overridden in the script. Local mode disables TLS only on loopback addresses.
-
-## Benchmark and concurrency check
-
-With the local stack running, run the reproducible three-size comparison (five repetitions of each fixed task and strategy):
-
-```bash
-.venv/bin/python scripts/benchmark.py
-```
-
-The script resets and seeds a 20-, 100-, then 500-tool HydraDB graph, runs the fixed feedback evaluation, executes full/flat/ablation/graph strategies, and reports task success, recall, estimated context tokens, retrieval p50/p95, and end-to-end p50/p95. Raw machine-readable output is written to `results/latest.json`.
-
-The fresh local results and methodology are summarized in [results/BENCHMARK.md](results/BENCHMARK.md). The raw JSON is ignored by Git and can be regenerated with the command above.
-
-Run a concurrent graph-route check:
-
-```bash
-.venv/bin/python scripts/load_test.py --requests 30 --concurrency 8 --size 500
-```
-
-Run unit tests:
+Start the local stack with `./scripts/dev.sh`, then open [http://127.0.0.1:8000](http://127.0.0.1:8000). Unit tests run with:
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-Latency and token counts depend on hardware and are not production claims. Tool tokens are estimated as serialized definition characters divided by four. The deterministic fixtures execute locally and do not include network LLM latency.
+The real Groq integration test runs only when `GROQ_API_KEY` is configured. The deterministic evaluation is available at `POST /api/evaluate`; `/api/learning/demo` runs the dependency evidence demonstration, and `POST /api/learning/rollback/{update_id}` rolls back its update.
 
-## Execution modes and held-out evaluation
+## Data license and attribution
 
-`POST /api/run` accepts `execution_mode: "fixture" | "agent"`; the default remains `fixture` for backward-compatible, reproducible runs. Agent mode requires `ANTHROPIC_API_KEY` on the API server (optionally set `ANTHROPIC_MODEL`, default `claude-haiku-4-5-20251001`). It sends only read-only tool definitions present in the HydraDB retrieved subgraph to Anthropic, runs a bounded tool-use loop, and executes tool calls against the local support fixtures. Write-capable tools are excluded. The hosted free demo does not receive an API key by default, so agent mode reports unavailable there until configured; provider calls can incur usage charges.
+The bundled SQLite database is a 500-order subset of the [Brazilian E-Commerce Public Dataset by Olist](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce), attributed to Olist and licensed **CC BY-NC-SA 4.0**. It is distributed separately from the MIT application code. The dataset license prohibits commercial use and requires attribution and ShareAlike for adaptations; do not use the Olist-backed demo in a paid or other commercial service without a suitable separate license. See [data/README.md](data/README.md) and the [license deed](https://creativecommons.org/licenses/by-nc-sa/4.0/). The importer omits customer location, reviews, free text, and geolocation.
 
-Graph entity retrieval reads ticket (`T-…`), customer (`C-…`), and order (`O-…`) IDs from the request and only returns a matching HydraDB relationship path. Unknown IDs fail closed without falling back to the demo's default entities. `GET /api/agent/status` reports availability without exposing credentials.
+## Limitations
 
-`POST /api/evaluate` holds out nine prompts and reports each graph and dependency-expanded lexical baseline result, tool recall, exact-entity behavior, and per-case wins and failures. The expanded-flat baseline is lexical top-k with declared dependency expansion; it is not an embedding-based semantic search baseline.
-
-## Deployment
-
-The container deployment path and hosted topology notes are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). For a local container demo, run `./scripts/compose-up.sh`. The native one-command development path remains `./scripts/dev.sh`.
-
-The repository also includes a free Render Blueprint. It runs HydraDB and the API in one web service and reseeds demo data after each cold start; see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for free-tier lifecycle limits.
-
-## Product and go-to-market
-
-**Initial customer:** agent platform teams operating large internal MCP catalogs for support, IT, or operations workflows. They need to select compatible tools, preserve dependency order, and reuse known entities without loading every tool schema on each turn.
-
-**Value:** fewer tool definitions and lower tool-selection failure risk for tasks with multi-step dependencies. ContextGraph fits between an agent runtime and its MCP registry; it can return a compact tool context and execution trace. A plausible initial model is a developer tier for hosted graph/context usage, then team/enterprise pricing for private catalogs, SSO, audit, policy controls, and service-level commitments. Pricing and market-size claims need customer interviews; this project does not make unsupported market estimates.
-
-**30-second pitch:** “A large MCP catalog makes every agent prompt pay for tools the task will never use. ContextGraph keeps skills, tools, dependencies, and resolved entities in HydraDB, then traverses only the neighborhood required for the task. In this support workflow, the agent gets a small tool set, follows its dependencies, reuses its customer/order context, and completes the task without loading the full catalog.”
-
-**Landing headline:** More tools. Smaller agent context.
-
-**Launch post draft:** “We built ContextGraph for the MCP sprawl problem: store tool relationships in HydraDB, traverse only what a task needs, and measure context, recall, and latency against full-context and keyword baselines. The demo runs locally with deterministic tools—no API key required.”
-
-## Architecture
-
-```mermaid
-flowchart LR
-  Q[Task] --> F[FastAPI]
-  F -->|HTTP OpenCypher| H[HydraDB graph-node]
-  H --> S[SlateDB + local FS in dev]
-  H --> R[Task → Skill → Tool → dependency traversal]
-  R --> C[Small context + resolved entities]
-  C --> X[Local deterministic tool runtime]
-  X --> G[Execution feedback]
-  G -->|relationship weight updates| H
-  R --> U[Web playground / comparisons / learning]
-  X --> U
-```
-
-The backend architecture, benchmark design, actual HydraDB constraints, and limitations are documented in [docs/HYDRADB_PHASE0.md](docs/HYDRADB_PHASE0.md). Submission and demo materials are in [docs/LAUNCH_ASSETS.md](docs/LAUNCH_ASSETS.md).
+The nine held-out prompts are authored, descriptive cases rather than a statistically powered benchmark. Execution outcomes are deterministic over source rows; they do not establish LLM reasoning quality. The semantic baseline uses local skill candidate matching and dependency expansion, not a learned embedding model. The refund rule is simulated. Render Free storage is ephemeral. The app code is MIT licensed; HydraDB and Olist retain their separate upstream licenses.
 
 ## License
 
-ContextGraph project code is MIT licensed. HydraDB is a separate dependency and is licensed by its upstream repository under Elastic License 2.0; review both licenses before redistributing a combined image.
+ContextGraph application code: MIT. Olist subset: CC BY-NC-SA 4.0. HydraDB is a separate dependency; see its upstream repository for its license.

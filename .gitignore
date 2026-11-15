@@ -2,6 +2,12 @@
 /.hydradb/
 /web/node_modules/
 /.venv/
+.env
+.env.*
+!.env.example
+/data/*
+!/data/README.md
+!/data/olist_demo.sqlite
 __pycache__/
 *.py[cod]
 /results/*.json

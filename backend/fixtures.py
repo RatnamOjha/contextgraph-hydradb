@@ -45,6 +45,8 @@ SERVERS = {
     "commerce-mcp": "Commerce MCP",
     "billing-mcp": "Billing MCP",
     "shipping-mcp": "Shipping MCP",
+    "olist-data": "Olist Historical Data Tools",
+    "contextgraph-simulated": "ContextGraph Simulated Policy",
 }
 
 CORE_TOOLS = [
@@ -71,11 +73,26 @@ CORE_TOOLS = [
 SKILLS = {
     "support_triage": ("Support triage", "Investigate a customer support ticket and prepare an evidence-based reply."),
     "customer_context": ("Customer context", "Resolve a customer identity and retrieve the account context needed for support."),
+    "order_support": ("Order support", "Inspect a historical order, its line items, and its related business records."),
     "refund_review": ("Refund review", "Check order and policy evidence before deciding refund eligibility."),
     "billing_review": ("Billing review", "Investigate invoices, subscription state, and payment history."),
     "delivery_investigation": ("Delivery investigation", "Trace order fulfillment, carrier events, and return status."),
+    "product_research": ("Product and seller research", "Inspect product category, weight, and seller details for order items."),
     "catalog_utilities": ("Catalog utilities", "General read-only helpers not tied to the active support workflow."),
 }
+
+DATA_TOOLS = [
+    Tool("customer.lookup", "Look up customer", "Find an anonymized Olist customer ID and its stable customer reference. Omits customer location and contact data.", "olist-data", "customer_context", "{customer_id: string}"),
+    Tool("customer.orders", "List customer orders", "List historical source orders for the stable customer reference returned by customer.lookup.", "olist-data", "customer_context", "{customer_unique_id: string}", dependencies=("customer.lookup",)),
+    Tool("order.details", "Read order details", "Read source order status, timestamps, total item value, item count, and associated anonymized customer IDs.", "olist-data", "order_support", "{order_id: string}"),
+    Tool("order.items", "Read order items", "Read source line items with product and seller IDs, price, freight, category, and product weight.", "olist-data", "product_research", "{order_id: string}", dependencies=("order.details",)),
+    Tool("order.payments", "Read order payments", "Read source payment types, installment counts, and values for an order.", "olist-data", "billing_review", "{order_id: string}", dependencies=("order.details",)),
+    Tool("order.delivery_status", "Read delivery status", "Derive delivery timing only from source carrier, delivered, and estimated timestamps.", "olist-data", "delivery_investigation", "{order_id: string}", dependencies=("order.details",)),
+    Tool("product.details", "Read product details", "Read a product's source category and weight. Product descriptions are not present in the dataset.", "olist-data", "product_research", "{product_id: string}", dependencies=("order.items",)),
+    Tool("seller.details", "Read seller details", "Read a seller's anonymized source ID and state only.", "olist-data", "product_research", "{seller_id: string}", dependencies=("order.items",)),
+    Tool("policy.lookup", "Read demo refund policy", "Return the named ContextGraph demo policy; this is simulated app content, not an Olist business rule.", "contextgraph-simulated", "refund_review", "{topic: string}"),
+    Tool("refund.eligibility", "Evaluate demo refund policy", "Apply the explicitly simulated ContextGraph demo rule to source order facts; this is not an Olist policy or historical refund record.", "contextgraph-simulated", "refund_review", "{order_id: string, reason: string}", dependencies=("order.details",)),
+]
 
 TASKS = {
     "refund": {
@@ -136,18 +153,5 @@ EVALUATION_CASES = [
 ]
 
 def make_catalog(size: int = 20) -> list[Tool]:
-    """Return realistic core MCP tools plus deterministic irrelevant distractors."""
-    tools = list(CORE_TOOLS)
-    for i in range(max(0, size - len(tools))):
-        group = i % len(SERVERS)
-        server = list(SERVERS)[group]
-        skill = "catalog_utilities"
-        tools.append(Tool(
-            key=f"catalog.utility_{i + 1:03d}",
-            name=f"Catalog utility {i + 1:03d}",
-            description=f"Read-only {('customer' if i % 2 else 'order')} operations utility for service workflow {i + 1:03d}.",
-            server=server,
-            skill=skill,
-            input_schema="{record_id: string}",
-        ))
-    return tools
+    """Return executable domain tools; `size` is accepted for API compatibility."""
+    return [*CORE_TOOLS, *DATA_TOOLS]

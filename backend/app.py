@@ -12,11 +12,17 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from .config import load_env_file
 
-from .fixtures import EVALUATION_CASES, SKILLS, TASKS, TRAINING_TASKS, make_catalog
+load_env_file()
+
+from .fixtures import DATA_TOOLS, EVALUATION_CASES, SKILLS, TASKS, TRAINING_TASKS, make_catalog
 from .hydra import HydraClient, HydraError
-from .registry import inspect_tools, seed_catalog
-from .router import classify, execute_fixture, expanded_flat_retrieve, flat_retrieve, route_graph, tool_json
+from .registry import inspect_tools, seed_catalog, seed_olist_entities
+from .router import candidate_skills, classify, execute_fixture, expanded_flat_retrieve, flat_candidates, flat_retrieve, route_graph, route_graph_candidates, tool_json
+from .olist_store import DEFAULT_DB, available as olist_available, dataset_status, list_orders, lookup_order
+from .dataset_workflow import execute_deterministic, extract_order_id
+from .groq_agent import run_groq_agent
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("contextgraph")
@@ -38,6 +44,11 @@ class RunRequest(BaseModel):
 class EvalRequest(BaseModel):
     catalog_size: Literal[20, 100, 500] = 100
     iterations: int = Field(default=3, ge=1, le=6)
+    real_model_cases: int = Field(default=0, ge=0, le=3)
+
+
+class LearningRollbackRequest(BaseModel):
+    update_id: int
 
 
 @asynccontextmanager
@@ -82,7 +93,22 @@ async def ready():
 
 @app.get("/api/agent/status")
 async def agent_status():
-    return {"available": bool(os.getenv("ANTHROPIC_API_KEY")), "provider": "Anthropic", "model": os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")}
+    return {"available": bool(os.getenv("GROQ_API_KEY")) and olist_available(), "provider": "Groq", "model": os.getenv("GROQ_MODEL", "openai/gpt-oss-20b"), "dataset_available": olist_available()}
+
+
+@app.get("/api/dataset/status")
+async def data_status():
+    return dataset_status()
+
+
+@app.get("/api/orders")
+async def orders(limit: int = 50):
+    try:
+        return {"orders": list_orders(limit)}
+    except FileNotFoundError as exc:
+        raise HTTPException(503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, detail=str(exc)) from exc
 
 
 @app.post("/api/seed")
@@ -98,7 +124,14 @@ async def seed(request: SeedRequest):
 @app.get("/api/tools")
 async def tools():
     try:
-        return {"tools": await inspect_tools(db)}
+        rows = await inspect_tools(db)
+        executable = {tool.key: tool for tool in DATA_TOOLS}
+        for row in rows:
+            tool = executable.get(row["key"])
+            row["execution_status"] = ("simulated_policy" if tool.server == "contextgraph-simulated" else "dataset_backed") if tool else "legacy_fixture_only"
+            row["source"] = "ContextGraph demo policy" if tool and tool.server == "contextgraph-simulated" else "Olist historical dataset" if tool else "Synthetic legacy fixture; excluded from Groq agent tools"
+            row["dependencies"] = list(tool.dependencies) if tool else []
+        return {"tools": rows}
     except Exception as exc:
         raise as_http_error(exc) from exc
 
@@ -130,6 +163,30 @@ async def record_execution(scenario: str, task_text: str, method: str, success: 
     if resolved:
         rows = [{"src": execution_id, "dst": db.id_for("Entity", f"{row['type']}:{row['id']}")} for row in resolved]
         await db.query("UNWIND $rows AS row CREATE (e {id: row.src})-[:RESOLVED]->(n {id: row.dst})", {"rows": rows})
+
+
+async def record_dataset_execution(task_text: str, method: str, success: bool, candidates: list[dict], selected: list[str],
+                                   outputs: list[dict], resolved: list[dict], duration_ms: float, agent: dict | None) -> None:
+    execution_id = int(time.time_ns() & ((1 << 62) - 1)) or 1
+    task_id = (execution_id + 1) & ((1 << 62) - 1) or 2
+    failure_rows = [row for row in outputs if row.get("error") or "error" in row.get("result", {})]
+    call_errors = [row.get("result", {}).get("error", "tool error") for row in failure_rows]
+    usage = agent or {}
+    await db.query("UNWIND $rows AS row MERGE (e {id: row.id}) SET e:Execution, e.method=row.method, e.success=row.success, e.duration_ms=row.duration_ms, e.provider=row.provider, e.input_tokens=row.input_tokens, e.output_tokens=row.output_tokens, e.errors=row.errors",
+        {"rows": [{"id": execution_id, "method": method, "success": success, "duration_ms": duration_ms, "provider": usage.get("provider", "fixture"), "input_tokens": usage.get("input_tokens", 0), "output_tokens": usage.get("output_tokens", 0), "errors": json.dumps(call_errors)}]})
+    await db.query("UNWIND $rows AS row MERGE (t {id: row.id}) SET t:Task, t.prompt=row.prompt",
+        {"rows": [{"id": task_id, "prompt": task_text}]})
+    await db.query("UNWIND $rows AS row CREATE (e {id: row.src})-[:FOR_TASK]->(t {id: row.dst})", {"rows": [{"src": execution_id, "dst": task_id}]})
+    candidate_edges = [{"src": task_id, "dst": db.id_for("Skill", row["skill"])} for row in candidates]
+    if candidate_edges:
+        await db.query("UNWIND $rows AS row CREATE (t {id: row.src})-[:CANDIDATE_SKILL]->(s {id: row.dst})", {"rows": candidate_edges})
+    for rel, keys in (("SELECTED", selected), ("CALLED", [row["tool"] for row in outputs]), ("FAILED", [row["tool"] for row in failure_rows])):
+        edges = [{"src": execution_id, "dst": db.id_for("Tool", key)} for key in keys]
+        if edges:
+            await db.query(f"UNWIND $rows AS row CREATE (e {{id: row.src}})-[:{rel}]->(t {{id: row.dst}})", {"rows": edges})
+    resolved_edges = [{"src": execution_id, "dst": db.id_for("Entity", f"{row['type']}:{row['id']}")} for row in resolved]
+    if resolved_edges:
+        await db.query("UNWIND $rows AS row CREATE (e {id: row.src})-[:RESOLVED]->(n {id: row.dst})", {"rows": resolved_edges})
 
 
 READ_ONLY_AGENT_TOOLS = {
@@ -234,8 +291,105 @@ async def run_anthropic_agent(task: str, scenario: str, selected: list, resolved
     raise HTTPException(502, detail="Anthropic agent exceeded the four-turn tool-use limit.")
 
 
+async def run_dataset_task(request: RunRequest) -> dict:
+    if not olist_available():
+        raise HTTPException(503, detail="Olist dataset is not installed on this server. Import the official dataset before running historical orders.")
+    order_id, parse_error = extract_order_id(request.task)
+    if parse_error:
+        raise HTTPException(422, detail=parse_error)
+    if not order_id:
+        raise HTTPException(422, detail="Select a historical order from the order list and include its 32-character ID in the task.")
+    source_order = lookup_order(order_id)
+    if not source_order:
+        started = time.perf_counter()
+        try:
+            await record_dataset_execution(request.task, f"{request.method}:{request.execution_mode}", False,
+                candidate_skills(request.task), [], [], [], (time.perf_counter()-started)*1000, None)
+        except Exception:
+            log.exception("unknown_order_trace_write_failed")
+        return {"scenario": "olist_order", "task": request.task, "method": request.method,
+            "execution_mode": request.execution_mode, "selected_tools": [], "paths": [], "resolved_entities": [],
+            "metrics": {"task_success": False, "tool_precision": 0, "tool_recall": 0, "context_tokens_est": 0,
+                "retrieval_ms": 0, "end_to_end_ms": 0, "unnecessary_tools": 0, "tool_calls": 0,
+                "dependency_success": False, "entity_resolution_correct": False},
+            "trace": [{"step": "entity-lookup", "message": f"No Olist order exists for ID {order_id}; no tool calls were run."}],
+            "tool_outputs": [], "answer": f"Unknown Olist order ID: {order_id}. Choose an order from the imported sample."}
+
+    candidates = candidate_skills(request.task)
+    started = time.perf_counter()
+    selected: list = []
+    paths: list = []
+    resolved: list = []
+    retrieval_ms = 0.0
+    if request.method == "graph":
+        route = await route_graph_candidates(db, candidates, order_id)
+        by_key = {tool.key: tool for tool in DATA_TOOLS}
+        for row in route["tools"]:
+            tool = by_key.get(row["key"])
+            if tool:
+                selected.append(tool)
+                row["why"] = row.get("why", [])
+        # Attach structured relationship evidence to the selected tool metadata.
+        reasons = {row["key"]: row.get("why", []) for row in route["tools"]}
+        paths, resolved, retrieval_ms = route["edges"], route["resolved_entities"], route["retrieval_ms"]
+    elif request.method == "full":
+        selected = list(DATA_TOOLS)
+        reasons = {tool.key: ["Included by full-context baseline"] for tool in selected}
+    else:
+        selected = flat_candidates(request.task, candidates, expand=request.method == "expanded_flat")
+        reasons = {tool.key: ["Local skill candidate plus lexical ranking/dependency metadata"] for tool in selected}
+        retrieval_ms = (time.perf_counter() - started) * 1000
+    if request.method == "graph" and not selected:
+        raise HTTPException(503, detail="HydraDB returned no executable tools. Seed the catalog and Olist entity graph first.")
+    if request.method == "graph" and not resolved:
+        # The selected order was verified in SQLite. Require its graph node too;
+        # never imply a HydraDB entity resolution if the graph is stale.
+        raise HTTPException(503, detail="The order exists in SQLite but its HydraDB entity path is missing. Re-seed the context graph.")
+
+    context_json = json.dumps([tool_json(tool) for tool in selected], separators=(",", ":"))
+    context_token_est = max(1, len(context_json)//4)
+    context_budget = max(300, min(12000, int(os.getenv("CONTEXTGRAPH_TOOL_CONTEXT_TOKEN_BUDGET", "2500"))))
+    if context_token_est > context_budget:
+        raise HTTPException(413, detail=f"Retrieved context ({context_token_est} estimated tokens) exceeds the configured budget ({context_budget}); required dependencies were not dropped.")
+    agent_result = await run_groq_agent(request.task, selected, DEFAULT_DB, order_id) if request.execution_mode == "agent" else execute_deterministic(request.task, order_id, selected, DEFAULT_DB)
+    agent_result["trace"].insert(0, {"step": "task-analysis", "message": "Candidate skills: " + ", ".join(row["skill"] for row in candidates)})
+    end_ms = (time.perf_counter() - started) * 1000
+    try:
+        await record_dataset_execution(request.task, f"{request.method}:{request.execution_mode}", agent_result["success"], candidates,
+            [tool.key for tool in selected], agent_result["tool_outputs"], resolved, end_ms, agent_result.get("agent"))
+    except Exception as exc:
+        log.exception("dataset_execution_trace_write_failed")
+        agent_result["trace"].append({"step": "trace-warning", "message": f"Could not persist execution evidence: {exc}"})
+    selected_json = []
+    for tool in selected:
+        row = tool_json(tool)
+        row["why"] = reasons.get(tool.key, [])
+        row["execution_status"] = "simulated_policy" if tool.server == "contextgraph-simulated" else "dataset_backed"
+        row["source"] = "ContextGraph demo policy" if tool.server == "contextgraph-simulated" else "Olist historical dataset"
+        selected_json.append(row)
+    expected = set(__import__("backend.dataset_workflow", fromlist=["required_tools"]).required_tools(request.task))
+    succeeded = {row["tool"] for row in agent_result["tool_outputs"] if not row.get("error")}
+    usage = agent_result.get("agent") or {}
+    return {"scenario": "olist_order", "task": request.task, "method": request.method,
+        "execution_mode": request.execution_mode, "agent": usage, "skill": [row["skill"] for row in candidates],
+        "selected_tools": selected_json, "paths": paths, "resolved_entities": resolved,
+        "metrics": {"task_success": agent_result["success"], "tool_precision": round(len(expected & {t.key for t in selected}) / max(1, len(selected)), 3),
+            "tool_recall": round(len(expected & {t.key for t in selected}) / max(1, len(expected)), 3),
+            "context_tokens_est": context_token_est, "retrieval_ms": round(retrieval_ms, 3),
+            "end_to_end_ms": round(end_ms, 3), "unnecessary_tools": len({t.key for t in selected} - expected),
+            "tool_calls": agent_result["tool_calls"], "dependency_success": not agent_result["missing_tools"] and not agent_result["dependency_failures"],
+            "argument_correctness": not any(row.get("error") for row in agent_result["tool_outputs"]),
+            "entity_resolution_correct": any(row["type"] == "order" and row["id"] == order_id for row in resolved),
+            "actual_input_tokens": usage.get("input_tokens"), "actual_output_tokens": usage.get("output_tokens")},
+        "trace": agent_result["trace"], "tool_outputs": agent_result["tool_outputs"], "answer": agent_result["answer"]}
+
+
 @app.post("/api/run")
 async def run_task(request: RunRequest):
+    if request.execution_mode == "agent" or re.search(r"\b[0-9a-f]{32}\b", request.task, re.I):
+        if request.execution_mode == "agent" and request.method not in {"graph", "flat", "expanded_flat", "full"}:
+            raise HTTPException(422, detail="Dataset-backed agent mode supports graph, flat, expanded_flat, or full retrieval.")
+        return await run_dataset_task(request)
     started = time.perf_counter()
     scenario = classify(request.task)
     fixture = TASKS[scenario]
@@ -350,6 +504,29 @@ async def adjust_skill_edge(scenario: str, skill: str, value: float) -> None:
 
 @app.post("/api/evaluate")
 async def evaluate(request: EvalRequest):
+    if olist_available():
+        from .evaluation import evaluate_olist
+        try:
+            result = await evaluate_olist(db)
+            if request.real_model_cases:
+                if not os.getenv("GROQ_API_KEY"):
+                    raise HTTPException(503, detail="Set GROQ_API_KEY on the API server to run the optional real-model subset.")
+                model_results = []
+                for case in result["cases"][:request.real_model_cases]:
+                    candidates = candidate_skills(case["task"])
+                    route = await route_graph_candidates(db, candidates, case["order_id"])
+                    allowed = {row["key"] for row in route["tools"]}
+                    tools = [tool for tool in DATA_TOOLS if tool.key in allowed]
+                    output = await run_groq_agent(case["task"], tools, DEFAULT_DB, case["order_id"])
+                    model_results.append({"case": case["name"], "success": output["success"], "answer": output["answer"], "agent": output.get("agent"), "tool_calls": output["tool_outputs"]})
+                result["real_agent_subset"] = model_results
+                result["real_model_case_count"] = len(model_results)
+                result["real_model_provider_calls"] = sum(row["agent"]["provider_calls"] for row in model_results if row.get("agent"))
+            return result
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise as_http_error(exc) from exc
     try:
         catalog = make_catalog(request.catalog_size)
         required = {key: value["skill"] for key, value in TASKS.items()}
@@ -440,6 +617,79 @@ async def evaluate(request: EvalRequest):
             result = await score()
             history.append({"iteration": iteration, **result, "training_success_rate": training_successes / len(TRAINING_TASKS), "updates": updates})
         return {"history": history, "frozen_baseline": frozen_baseline, "training_fixtures": [row["prompt"] for row in TRAINING_TASKS.values()], "held_out": [row["task"] for row in EVALUATION_CASES], "feedback": "successful route reinforcement and training-only retrieval-miss correction", "comparison": history[-1]["cases"]}
+    except Exception as exc:
+        raise as_http_error(exc) from exc
+
+
+async def set_dependency_weight(tool_key: str, dependency_key: str, weight: float) -> None:
+    tool_id = db.id_for("Tool", tool_key)
+    dependency_id = db.id_for("Tool", dependency_key)
+    await db.query(f"MATCH (a:Tool {{id: {tool_id}}})-[r:DEPENDS_ON]->(b:Tool {{id: {dependency_id}}}) SET r.weight = {weight:.1f}")
+
+
+@app.post("/api/learning/demo")
+async def learning_demo():
+    """Remove a prerequisite, observe the failure, repair from evidence, and retest on a new order."""
+    if not olist_available(): raise HTTPException(503, detail="Import the Olist demo subset first.")
+    rows = list_orders(20)
+    if len(rows) < 2: raise HTTPException(503, detail="The learning demo requires two distinct source orders.")
+    training, heldout = rows[0]["order_id"], rows[1]["order_id"]
+    tool_key, dependency = "order.items", "order.details"
+    train_task = f"Identify the line-item goods and seller IDs for historical record {training}."
+    test_task = f"Which purchased goods were included in source record {heldout}?"
+    candidates = candidate_skills(train_task)
+    await set_dependency_weight(tool_key, dependency, 0.0)
+    applied = False
+    try:
+        before_route = await route_graph_candidates(db, candidates, training)
+        by_key = {tool.key: tool for tool in DATA_TOOLS}
+        before_tools = [by_key[row["key"]] for row in before_route["tools"] if row["key"] in by_key]
+        before = execute_deterministic(train_task, training, before_tools, DEFAULT_DB)
+        await record_dataset_execution(train_task, "graph:fixture:dependency-removed", before["success"], candidates,
+            [tool.key for tool in before_tools], before["tool_outputs"], before_route["resolved_entities"], 0.0, None)
+        evidence = before["dependency_failures"]
+        proposed = next(((row["tool"], row["missing_dependency"]) for row in evidence
+                         if row["tool"] == tool_key and row["missing_dependency"] == dependency), None)
+        declared = next((tool for tool in DATA_TOOLS if tool.key == tool_key), None)
+        if not proposed or not declared or dependency not in declared.dependencies:
+            raise HTTPException(409, detail={"message": "Execution evidence did not validate the missing dependency; no graph update was applied.", "evidence": evidence})
+
+        update_id = int(time.time_ns() & ((1 << 62) - 1)) or 3
+        await set_dependency_weight(tool_key, dependency, 1.0)
+        applied = True
+        await db.query("UNWIND $rows AS row MERGE (u {id: row.id}) SET u:LearningUpdate, u.tool=row.tool, u.dependency=row.dependency, u.previous_weight=row.previous_weight, u.applied_weight=row.applied_weight, u.state=row.state, u.evidence=row.evidence, u.training_order=row.training_order, u.heldout_order=row.heldout_order",
+            {"rows": [{"id": update_id, "tool": tool_key, "dependency": dependency, "previous_weight": 0.0,
+                "applied_weight": 1.0, "state": "applied", "evidence": json.dumps(evidence), "training_order": training, "heldout_order": heldout}]})
+        after_candidates = candidate_skills(test_task)
+        after_route = await route_graph_candidates(db, after_candidates, heldout)
+        after_tools = [by_key[row["key"]] for row in after_route["tools"] if row["key"] in by_key]
+        after = execute_deterministic(test_task, heldout, after_tools, DEFAULT_DB)
+        await record_dataset_execution(test_task, "graph:fixture:after-learning", after["success"], after_candidates,
+            [tool.key for tool in after_tools], after["tool_outputs"], after_route["resolved_entities"], 0.0, None)
+        return {"update_id": update_id, "training_order_id": training, "heldout_order_id": heldout,
+            "before": {"task": train_task, "success": before["success"], "selected_tools": [t.key for t in before_tools], "trace": before["trace"], "dependency_failures": evidence},
+            "proposal": {"tool": tool_key, "missing_dependency": dependency, "evidence": evidence, "validation": "matched declared tool prerequisite and observed execution dependency failure"},
+            "mutation": {"edge": f"{tool_key} -[DEPENDS_ON]-> {dependency}", "weight_before": 0.0, "weight_after": 1.0, "state": "applied"},
+            "after": {"task": test_task, "success": after["success"], "selected_tools": [t.key for t in after_tools], "trace": after["trace"], "dependency_failures": after["dependency_failures"]},
+            "heldout_is_disjoint": training != heldout, "rollback_endpoint": f"/api/learning/rollback/{update_id}"}
+    except Exception:
+        if not applied:
+            await set_dependency_weight(tool_key, dependency, 1.0)
+        raise
+
+
+@app.post("/api/learning/rollback/{update_id}")
+async def rollback_learning(update_id: int):
+    try:
+        _, rows, _ = await db.query(f"MATCH (u:LearningUpdate {{id: {update_id}}}) RETURN u.tool AS tool,u.dependency AS dependency,u.previous_weight AS previous_weight,u.state AS state")
+        if not rows: raise HTTPException(404, detail="Learning update was not found.")
+        tool, dependency, previous, state = rows[0]
+        if state != "applied": raise HTTPException(409, detail=f"Learning update is already {state}.")
+        await set_dependency_weight(tool, dependency, float(previous))
+        await db.query(f"MATCH (u:LearningUpdate {{id: {update_id}}}) SET u.state = 'rolled_back'")
+        return {"update_id": update_id, "state": "rolled_back", "edge": f"{tool} -[DEPENDS_ON]-> {dependency}", "restored_weight": previous}
+    except HTTPException:
+        raise
     except Exception as exc:
         raise as_http_error(exc) from exc
 

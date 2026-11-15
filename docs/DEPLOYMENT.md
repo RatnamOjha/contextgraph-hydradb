@@ -26,7 +26,7 @@ The Compose file uses a demo token and plaintext only within the private contain
 
 ## Hosted demo
 
-The `render.yaml` Blueprint uses one **Render Free web service** to honor the no-cost requirement. The root `Dockerfile` packages the published HydraDB `0.4.0` image with the Python API. Both processes run in one container; HydraDB's HTTP, Bolt, and admin listeners bind to loopback, and only the API binds to Render's public port. On each start, the entrypoint waits for HydraDB, seeds a 100-tool catalog, runs the three-cycle evaluation, and then reports the service ready.
+The `render.yaml` Blueprint uses one **Render Free web service** to honor the no-cost requirement. The root `Dockerfile` packages the published HydraDB `0.4.0` image with the Python API and bundled Olist subset. Both processes run in one container; HydraDB's HTTP, Bolt, and admin listeners bind to loopback, and only the API binds to Render's public port. On each start, the entrypoint waits for HydraDB, seeds the graph, warms the deterministic evaluation, and then reports the service ready. `GROQ_API_KEY` is declared as a non-synced secret; add it through the Render service environment settings to enable hosted agent mode. A local `.env` is not uploaded.
 
 This free setup is a demo deployment with volatile state. Render Free services have an ephemeral filesystem, cannot attach persistent disks, and spin down after 15 minutes without inbound traffic; waking a service takes about a minute. The graph is rebuilt after each sleep, restart, or redeploy. Startup restores the demo automatically, but past execution history does not persist. Render includes 750 free instance hours per workspace each calendar month. If free limits are exhausted without a payment method, Render suspends the free service rather than billing extra usage.
 
@@ -40,4 +40,4 @@ Deployment references:
 - [Render persistent disk limitations](https://render.com/docs/disks)
 - [Render Blueprint reference](https://render.com/docs/blueprint-spec)
 
-The public free service is live at [contextgraph-demo.onrender.com](https://contextgraph-demo.onrender.com). It has no paid database or disk resource. The account's saved Render CLI authentication was used to create it; the deployment's generated HydraDB token is stored as a Render environment secret and is not in this repository.
+The public free service is live at [contextgraph-demo.onrender.com](https://contextgraph-demo.onrender.com). It has no paid database or disk resource. The deployment's generated HydraDB token is stored as a Render environment secret and is not in this repository. The bundled Olist subset is licensed CC BY-NC-SA 4.0, so this public demo must remain non-commercial unless separately licensed.
