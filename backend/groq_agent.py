@@ -6,6 +6,8 @@ import json
 import os
 import re
 import time
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,67 @@ import httpx
 from .objectives import evaluate_answer, evidence_from_outputs, requested_objectives
 from .olist_store import execute_data_tool
 from .router import tool_json
+
+
+def _duration_seconds(value: str | None) -> float | None:
+    if not value:
+        return None
+    raw = str(value).strip().lower()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    parts = re.findall(r"([0-9]+(?:\.[0-9]+)?)\s*(ms|s|m|h)", raw)
+    if not parts:
+        try:
+            when = parsedate_to_datetime(raw)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
+    scale = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
+    return sum(float(number) * scale[unit] for number, unit in parts)
+
+
+def rate_limit_info(headers: Any, payload: Any, attempt: int, remaining_seconds: float,
+                    max_retries: int) -> dict[str, Any]:
+    """Classify Groq 429s and return a bounded, Retry-After-aware retry decision."""
+    headers = {str(k).lower(): str(v) for k, v in dict(headers or {}).items()}
+    error = payload.get("error", {}) if isinstance(payload, dict) else {}
+    message = str(error.get("message", "") if isinstance(error, dict) else error)[:500]
+    code = str(error.get("code", "") if isinstance(error, dict) else "").lower()
+    combined = f"{code} {message} {' '.join(headers)}".lower()
+    if re.search(r"\b(daily|per day|requests per day|tokens per day|rpd|tpd)\b", combined):
+        kind, exhausted = "daily_quota_exhausted", True
+    elif re.search(r"\b(tokens per minute|token per minute|tpm)\b|token[- ]rate", combined):
+        kind, exhausted = "tokens_per_minute", False
+    elif re.search(r"\b(requests per minute|request per minute|rpm)\b", combined):
+        kind, exhausted = "requests_per_minute", False
+    else:
+        kind, exhausted = "rate_limit_unspecified", False
+
+    retry_values = [_duration_seconds(headers.get("retry-after"))]
+    if kind == "requests_per_minute":
+        retry_values.append(_duration_seconds(headers.get("x-ratelimit-reset-requests")))
+    elif kind == "tokens_per_minute":
+        retry_values.append(_duration_seconds(headers.get("x-ratelimit-reset-tokens")))
+    else:
+        retry_values.extend((_duration_seconds(headers.get("x-ratelimit-reset-requests")),
+                             _duration_seconds(headers.get("x-ratelimit-reset-tokens"))))
+    found = [value for value in retry_values if value is not None]
+    match = re.search(r"try again in\s+([0-9.]+\s*(?:ms|s|m|h)(?:\s+[0-9.]+\s*(?:ms|s|m|h))*)", message, re.I)
+    if match:
+        parsed = _duration_seconds(match.group(1))
+        if parsed is not None:
+            found.append(parsed)
+    retry_after = max(found) if found else None
+    backoff = min(8.0, 0.5 * (2 ** max(0, attempt - 1)))
+    delay = max(backoff, retry_after or 0.0)
+    retry = not exhausted and attempt <= max_retries and delay < max(0.0, remaining_seconds)
+    reason = "daily_quota" if exhausted else "retry_budget" if attempt > max_retries else "deadline" if delay >= remaining_seconds else "retry"
+    return {"kind": kind, "message": message or "Provider rate limit.", "retry_after_seconds": retry_after,
+            "backoff_seconds": backoff, "delay_seconds": delay, "retry": retry, "stop_reason": reason}
 
 
 def _schema(tool: Any) -> dict[str, Any]:
@@ -47,6 +110,8 @@ async def run_groq_agent(task: str, selected_tools: list[Any], data_path: str | 
     max_calls = max(1, min(8, tool_call_budget or int(os.getenv("CONTEXTGRAPH_MAX_AGENT_CALLS", "6"))))
     configured_turns = provider_request_budget if provider_request_budget is not None else int(os.getenv("CONTEXTGRAPH_MAX_AGENT_TURNS", "5"))
     max_turns = max(1, min(6, configured_turns))
+    max_retries = max(0, min(3, int(os.getenv("CONTEXTGRAPH_PROVIDER_MAX_RETRIES", "2"))))
+    attempt_budget = max_turns if provider_request_budget is not None else min(12, max_turns + max_retries)
     max_tokens = max(512, min(60000, token_budget if token_budget is not None else int(os.getenv("CONTEXTGRAPH_MAX_AGENT_TOKENS", "16000"))))
     by_name = {tool.key.replace(".", "__"): tool for tool in selected_tools}
     by_key = {tool.key: tool for tool in selected_tools}
@@ -65,7 +130,7 @@ async def run_groq_agent(task: str, selected_tools: list[Any], data_path: str | 
     total_input = total_output = 0
     errors: list[dict[str, str]] = []
     calls_used = 0
-    provider_attempts = 0
+    provider_attempts = provider_responses = provider_successes = rate_limit_responses = 0
     seen_calls: set[tuple[str, str]] = set()
     repeated_calls = 0
     invalid_calls = 0
@@ -77,10 +142,14 @@ async def run_groq_agent(task: str, selected_tools: list[Any], data_path: str | 
         "Authorization": f"Bearer {os.environ['GROQ_API_KEY']}", "Content-Type": "application/json"})
 
     async def invoke() -> Any:
-        nonlocal provider_attempts
+        nonlocal provider_attempts, provider_responses, provider_successes, rate_limit_responses
         remaining = max(0.1, deadline - time.monotonic())
-        attempts = 0
+        retries = 0
         while True:
+          if provider_attempts >= attempt_budget:
+              failure = HTTPException(429, detail="Groq request-attempt budget exhausted; no additional provider request was sent.")
+              failure.provider_error = {"kind": "request_budget_exhausted", "message": str(failure.detail), "retry": False}
+              raise failure
           async with asyncio.timeout(remaining):
             provider_attempts += 1
             response = await client.post("https://api.groq.com/openai/v1/chat/completions", json={
@@ -89,17 +158,48 @@ async def run_groq_agent(task: str, selected_tools: list[Any], data_path: str | 
                 "parallel_tool_calls": False, "temperature": 0, "max_completion_tokens": max(32, min(512, max_tokens-total_input-total_output)),
             })
             if response.status_code == 429:
-                attempts += 1
-                retry_after = float(response.headers.get("retry-after", "0") or 0)
-                max_retries = max(0, min(1, int(os.getenv("CONTEXTGRAPH_PROVIDER_MAX_RETRIES", "1"))))
-                if attempts <= max_retries and 0 < retry_after <= 2 and time.monotonic()+retry_after < deadline:
-                    await asyncio.sleep(retry_after)
+                provider_responses += 1
+                rate_limit_responses += 1
+                try:
+                    body = response.json()
+                except (ValueError, TypeError):
+                    body = {}
+                info = rate_limit_info(response.headers, body, retries + 1, deadline - time.monotonic(), max_retries)
+                info["http_status"] = 429
+                if info["retry"] and provider_attempts < attempt_budget:
+                    retries += 1
+                    await asyncio.sleep(info["delay_seconds"])
                     remaining = max(0.1, deadline-time.monotonic())
                     continue
-                raise HTTPException(429, detail="Groq rate limit reached; no retry window remained within the bounded request budget.")
+                reason = "request_budget" if info["retry"] and provider_attempts >= attempt_budget else info["stop_reason"]
+                explanation = {"daily_quota": "daily quota appears exhausted; no retry was attempted",
+                    "retry_budget": "rate limit persisted through the bounded retry count",
+                    "deadline": "provider retry window exceeds the remaining request deadline",
+                    "request_budget": "the configured provider-attempt budget was exhausted"}.get(reason, "provider rate limit reached")
+                failure = HTTPException(429, detail=f"Groq {info['kind']}: {explanation}.")
+                info["stop_reason"] = reason
+                failure.provider_error = info
+                raise failure
+            provider_responses += 1
             if response.is_error:
-                raise HTTPException(502, detail=f"Groq request failed ({response.status_code}); check model access and provider status.")
+                failure = HTTPException(502, detail=f"Groq request failed ({response.status_code}); check model access and provider status.")
+                failure.provider_error = {"kind": "provider_http_error", "http_status": response.status_code,
+                    "message": str(failure.detail), "retry": False}
+                raise failure
+            provider_successes += 1
             return response.json()
+
+    def attach_provider_stats(exc: HTTPException) -> HTTPException:
+        exc.provider_calls = provider_attempts  # legacy alias
+        exc.provider_requests_attempted = provider_attempts
+        exc.provider_responses_received = provider_responses
+        exc.provider_requests_succeeded = provider_successes
+        exc.rate_limit_responses = rate_limit_responses
+        exc.input_tokens = total_input
+        exc.output_tokens = total_output
+        if not hasattr(exc, "provider_error"):
+            exc.provider_error = {"kind": "request_failed", "message": str(exc.detail), "retry": False}
+        return exc
 
     try:
         for turn in range(max_turns):
@@ -108,17 +208,13 @@ async def run_groq_agent(task: str, selected_tools: list[Any], data_path: str | 
                 response = await invoke()
             except (TimeoutError, httpx.TimeoutException) as exc:
                 failure = HTTPException(504, detail="Groq request timed out; no fixture fallback was run.")
-                failure.provider_calls = provider_attempts
-                failure.input_tokens = total_input
-                failure.output_tokens = total_output
-                raise failure from exc
+                raise attach_provider_stats(failure) from exc
             except Exception as exc:
                 if isinstance(exc, HTTPException):
-                    exc.provider_calls = provider_attempts
-                    exc.input_tokens = total_input
-                    exc.output_tokens = total_output
-                    raise
-                raise HTTPException(502, detail=f"Groq request failed ({type(exc).__name__}); check model access and provider status.") from exc
+                    raise attach_provider_stats(exc)
+                failure = HTTPException(502, detail=f"Groq request failed ({type(exc).__name__}); check model access and provider status.")
+                failure.provider_error = {"kind": "network_or_decode_error", "message": str(failure.detail), "retry": False}
+                raise attach_provider_stats(failure) from exc
             usage = response.get("usage") or {}
             total_input += usage.get("prompt_tokens", 0)
             total_output += usage.get("completion_tokens", 0)
@@ -145,6 +241,8 @@ async def run_groq_agent(task: str, selected_tools: list[Any], data_path: str | 
                         "tools_executed": sorted({r["tool"] for r in outputs if not r["error"]}),
                         "invalid_calls": invalid_calls, "repeated_calls": repeated_calls, "execution_failures": execution_failures, "iterations": turn+1},
                     "agent": {"provider": "Groq", "model": model, "provider_calls": provider_attempts,
+                        "provider_requests_attempted": provider_attempts, "provider_responses_received": provider_responses,
+                        "provider_requests_succeeded": provider_successes, "rate_limit_responses": rate_limit_responses,
                         "input_tokens": total_input, "output_tokens": total_output,
                         "elapsed_ms": round((time.perf_counter()-started)*1000, 2)}}
             messages.append({"role": "assistant", "content": message.get("content"), "tool_calls": calls})
@@ -219,6 +317,8 @@ async def run_groq_agent(task: str, selected_tools: list[Any], data_path: str | 
                 "tools_executed": sorted({r["tool"] for r in outputs if not r["error"]}),
                 "invalid_calls": invalid_calls, "repeated_calls": repeated_calls, "execution_failures": execution_failures, "iterations": max_turns},
             "agent": {"provider": "Groq", "model": model, "provider_calls": provider_attempts,
+                "provider_requests_attempted": provider_attempts, "provider_responses_received": provider_responses,
+                "provider_requests_succeeded": provider_successes, "rate_limit_responses": rate_limit_responses,
                 "input_tokens": total_input, "output_tokens": total_output,
                 "elapsed_ms": round((time.perf_counter()-started)*1000, 2)}}
     finally:

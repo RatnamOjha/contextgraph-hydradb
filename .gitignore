@@ -8,6 +8,7 @@
 /data/*
 !/data/README.md
 !/data/olist_demo.sqlite
+/data/evaluation-checkpoints/
 __pycache__/
 *.py[cod]
 /results/*.json
