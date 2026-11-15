@@ -32,11 +32,25 @@ def flat_retrieve(text: str, catalog: list[Tool], limit: int = 8) -> list[Tool]:
     return sorted(catalog, key=score, reverse=True)[:limit]
 
 
+def expanded_flat_retrieve(text: str, catalog: list[Tool], limit: int = 5) -> list[Tool]:
+    """Lexical top-k retrieval followed by declared dependency expansion."""
+    by_key = {tool.key: tool for tool in catalog}
+    chosen = {tool.key: tool for tool in flat_retrieve(text, catalog, limit)}
+    frontier = list(chosen)
+    while frontier:
+        key = frontier.pop()
+        for dependency in by_key[key].dependencies:
+            if dependency in by_key and dependency not in chosen:
+                chosen[dependency] = by_key[dependency]
+                frontier.append(dependency)
+    return list(chosen.values())
+
+
 def tool_json(tool: Tool) -> dict[str, Any]:
     return {"key": tool.key, "name": tool.name, "description": tool.description, "server": tool.server, "skill": tool.skill, "input_schema": tool.input_schema}
 
 
-async def route_graph(db: HydraClient, scenario: str) -> dict[str, Any]:
+async def route_graph(db: HydraClient, scenario: str, task_text: str = "") -> dict[str, Any]:
     task_id = db.id_for("TaskType", scenario)
     t0 = time.perf_counter()
     _, ranks, _ = await db.query(
@@ -91,11 +105,33 @@ async def route_graph(db: HydraClient, scenario: str) -> dict[str, Any]:
         visited.update(next_frontier)
         frontier = next_frontier
 
-    _, entities, entity_ms = await db.query(
-        f"MATCH (tt:TaskType {{id: {task_id}}})-[:HAS_CONTEXT]->(ticket:Entity)-[:IDENTIFIES]->(customer:Entity)-[:HAS_ORDER]->(order:Entity) "
-        "RETURN ticket.external_id AS ticket, customer.external_id AS customer, order.external_id AS order"
-    )
+    entity_ids = {kind: ident for kind, ident in re.findall(r"\b(T|C|O)-([A-Za-z0-9]+)\b", task_text, re.I)}
+    prefixes = {"T": "ticket", "C": "customer", "O": "order"}
+    requested = {prefixes[k.upper()]: f"{k.upper()}-{v}" for k, v in entity_ids.items()}
+    # Use only validated alphanumeric IDs parsed from the user's text. When an
+    # ID is provided, it must match the entity path exactly.
+    if requested:
+        ticket_id = db.id_for("Entity", f"ticket:{requested.get('ticket', '')}") if "ticket" in requested else None
+        customer_id = db.id_for("Entity", f"customer:{requested.get('customer', '')}") if "customer" in requested else None
+        order_id = db.id_for("Entity", f"order:{requested.get('order', '')}") if "order" in requested else None
+        anchors = []
+        if ticket_id is not None: anchors.append(f"ticket.id = {ticket_id}")
+        if customer_id is not None: anchors.append(f"customer.id = {customer_id}")
+        if order_id is not None: anchors.append(f"order.id = {order_id}")
+        where = " AND ".join(anchors)
+        _, entities, entity_ms = await db.query(
+            "MATCH (ticket:Entity)-[:IDENTIFIES]->(customer:Entity)-[:HAS_ORDER]->(order:Entity) "
+            f"WHERE {where} RETURN ticket.external_id AS ticket, customer.external_id AS customer, order.external_id AS order LIMIT 1"
+        )
+    else:
+        entities, entity_ms = [], 0.0
     resolved = []
+    if entities:
+        ticket, customer, order = entities[0]
+        # Check all explicitly requested IDs, including formats that may have
+        # resolved to an ID with no matching graph node.
+        if any(requested.get(kind) != actual for kind, actual in [("ticket", ticket), ("customer", customer), ("order", order)] if kind in requested):
+            entities = []
     if entities:
         ticket, customer, order = entities[0]
         resolved = [

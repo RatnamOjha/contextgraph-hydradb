@@ -64,6 +64,14 @@ Run unit tests:
 
 Latency and token counts depend on hardware and are not production claims. Tool tokens are estimated as serialized definition characters divided by four. The deterministic fixtures execute locally and do not include network LLM latency.
 
+## Execution modes and held-out evaluation
+
+`POST /api/run` accepts `execution_mode: "fixture" | "agent"`; the default remains `fixture` for backward-compatible, reproducible runs. Agent mode requires `ANTHROPIC_API_KEY` on the API server (optionally set `ANTHROPIC_MODEL`, default `claude-haiku-4-5-20251001`). It sends only read-only tool definitions present in the HydraDB retrieved subgraph to Anthropic, runs a bounded tool-use loop, and executes tool calls against the local support fixtures. Write-capable tools are excluded. The hosted free demo does not receive an API key by default, so agent mode reports unavailable there until configured; provider calls can incur usage charges.
+
+Graph entity retrieval reads ticket (`T-…`), customer (`C-…`), and order (`O-…`) IDs from the request and only returns a matching HydraDB relationship path. Unknown IDs fail closed without falling back to the demo's default entities. `GET /api/agent/status` reports availability without exposing credentials.
+
+`POST /api/evaluate` holds out nine prompts and reports each graph and dependency-expanded lexical baseline result, tool recall, exact-entity behavior, and per-case wins and failures. The expanded-flat baseline is lexical top-k with declared dependency expansion; it is not an embedding-based semantic search baseline.
+
 ## Deployment
 
 The container deployment path and hosted topology notes are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). For a local container demo, run `./scripts/compose-up.sh`. The native one-command development path remains `./scripts/dev.sh`.

@@ -121,6 +121,20 @@ TRAINING_TASKS = {
     "delivery": {"prompt": "Case S-884: trace the delayed parcel and inspect its return authorization.", "skill": "delivery_investigation", "ticket": "T-8841", "customer": "C-884", "order": "O-884", "required_tools": ["ticket.lookup", "order.get", "shipment.track", "return.status"]},
 }
 
+# Unseen wording and identifiers: includes uncued IDs, missing IDs, and prompts
+# where tool descriptions overlap (e.g. return/charge/lookup).
+EVALUATION_CASES = [
+    {"name": "refund_rephrase", "scenario": "refund", "task": "For ticket T-2049, can policy cover the purchase? Check evidence only; do not send money.", "entity_expected": True},
+    {"name": "refund_unknown_ticket", "scenario": "refund", "task": "Customer C-7777 wants their money back for an item. Check refund eligibility, no action.", "entity_expected": False},
+    {"name": "billing_unfamiliar", "scenario": "billing", "task": "C-1042 does not recognize a debit. Reconcile the statement and captured or failed transaction records.", "entity_expected": True},
+    {"name": "billing_no_identifier", "scenario": "billing", "task": "Please explain whether the latest account charge actually settled and whether anything remains due.", "entity_expected": False},
+    {"name": "delivery_overlapping_return", "scenario": "delivery", "task": "The parcel for ticket T-2049 is delayed. Look up the order, its carrier scan, and whether a return was opened.", "entity_expected": True},
+    {"name": "delivery_unseen_order", "scenario": "delivery", "task": "Track order O-5555 and check the warehouse return status; do not cancel the purchase.", "entity_expected": False},
+    {"name": "refund_blended_tool_words", "scenario": "refund", "task": "Ticket T-2049: inspect the order and policy, but only determine eligibility; never create a refund.", "entity_expected": True},
+    {"name": "billing_overlapping_descriptions", "scenario": "billing", "task": "Look up invoice and payment history for customer C-1042; explain the disputed charge without reversing it.", "entity_expected": True},
+    {"name": "delivery_missing_entity", "scenario": "delivery", "task": "A shipment is late and a return may be pending. Find the carrier event and return authorization.", "entity_expected": False},
+]
+
 def make_catalog(size: int = 20) -> list[Tool]:
     """Return realistic core MCP tools plus deterministic irrelevant distractors."""
     tools = list(CORE_TOOLS)
