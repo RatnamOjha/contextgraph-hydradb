@@ -6,7 +6,7 @@
 
 [Open ContextGraph](https://contextgraph-demo.onrender.com). The Render Blueprint is configured for the Free plan. Free services sleep when idle and use ephemeral local storage, so the graph is reseeded after restart. The bundled SQLite demo subset is included in the image.
 
-The dashboard has three views: a graph-routed order workflow with deterministic fixture and real Groq agent modes; a controlled dependency-recovery experiment; and a searchable tool registry. A separate sequential real-Groq pilot compares full context, flat lexical retrieval, flat retrieval with prerequisite expansion, and HydraDB graph retrieval. Each observed result gets a stable ID, a local recovery journal entry, and a HydraDB write/readback before the case is marked complete.
+The dashboard provides Overview, Playground, Graph Explorer, Learning Lab, Tool Registry, Evaluations, and Documentation views. The Graph Explorer reads bounded task routes and same-order Olist entity relationships from HydraDB. The Playground separates deterministic fixture and real Groq execution, then shows retrieved tools, actual calls, and objective-level evidence verification. Learning Lab clearly distinguishes hosted retrieval-filter recovery from the separate local graph-mutation experiment. The evaluation view labels the small isolated deterministic benchmark and its context estimates. A separate sequential real-Groq pilot compares full context, flat lexical retrieval, flat retrieval with prerequisite expansion, and HydraDB graph retrieval. Each observed result gets a stable ID, a local recovery journal entry, and a HydraDB write/readback before the case is marked complete.
 
 ### Execution modes
 
@@ -15,6 +15,8 @@ The dashboard has three views: a graph-routed order workflow with deterministic 
 The entity retriever extracts a 32-character Olist order ID from each request and requires both a matching SQLite row and its HydraDB entity path. Unknown IDs fail closed. Refund eligibility is a clearly labeled simulated demo policy, not an Olist policy.
 
 The current real-Groq paired pilot is incomplete due to free-tier provider limits. Its preserved results and explicit `NOT_RUN` statuses are documented in [the real-agent benchmark report](docs/REAL_AGENT_BENCHMARK.md); no comparative superiority claim is made.
+
+Frontend implementation details and the bounded Graph Explorer API are described in [the frontend guide](docs/FRONTEND_GUIDE.md). A separate installable stdio MCP adapter is available in [packages/contextgraph-mcp](packages/contextgraph-mcp/README.md); it retrieves context and tool metadata through the existing API and never executes the returned tools. It is not published to a package registry.
 
 ## Local setup
 

@@ -80,7 +80,8 @@ def flat_candidates(task: str, candidates: list[dict[str, Any]], expand: bool = 
 
 
 async def route_graph_candidates(db: HydraClient, candidates: list[dict[str, Any]], order_id: str | None = None, max_depth: int = 6,
-                                exclude_dependencies: set[tuple[str, str]] | None = None) -> dict[str, Any]:
+                                exclude_dependencies: set[tuple[str, str]] | None = None,
+                                root_tool_keys: set[str] | None = None) -> dict[str, Any]:
     """HydraDB skill roots plus bounded, cycle-safe transitive tool closure."""
     if not candidates:
         return {"skills": [], "tools": [], "edges": [], "resolved_entities": [], "retrieval_ms": 0.0}
@@ -94,6 +95,8 @@ async def route_graph_candidates(db: HydraClient, candidates: list[dict[str, Any
     chosen: dict[int, dict[str, Any]] = {}
     edges: list[dict[str, str]] = []
     for skill, ident, key, name, description, server, schema, mcp in roots:
+        if root_tool_keys is not None and key not in root_tool_keys:
+            continue
         ident = int(ident)
         if ident in chosen:
             chosen[ident]["root_skills"].append(skill)

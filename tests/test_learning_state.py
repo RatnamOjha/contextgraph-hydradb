@@ -263,6 +263,35 @@ class DependencyStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({row["key"] for row in withheld["tools"]}, {"order.items"})
         self.assertTrue(all(query.lstrip().startswith("MATCH") for query in db.queries))
 
+    async def test_task_root_filter_keeps_status_context_independent_of_item_prerequisite(self):
+        class RouteDB:
+            @staticmethod
+            def id_for(kind, key): return {"order.items": 1, "order.details": 2,
+                "product.details": 3, "seller.details": 4}.get(key, 10)
+            async def query(self, query, params=None):
+                if "OPTIONAL MATCH (t)-[:PROVIDED_BY]" in query:
+                    return [], [
+                        ["product_research", 1, "order.items", "Items", "Read order items", "olist", "{}", None],
+                        ["product_research", 3, "product.details", "Product", "Read product", "olist", "{}", None],
+                        ["order_support", 2, "order.details", "Details", "Read details", "olist", "{}", None],
+                    ], 0.1
+                if "MATCH (a:Tool)-[r:DEPENDS_ON]->(b:Tool)" in query:
+                    if "a.id IN [1]" in query:
+                        return [], [[1, "order.items", 2, "order.details", "Details", "Read details", "olist", "{}", None]], 0.1
+                    return [], [], 0.1
+                raise AssertionError(query)
+
+        db = RouteDB()
+        categories = await route_graph_candidates(db,
+            [{"skill": "product_research", "score": 1, "evidence": ["category"]}],
+            root_tool_keys={"order.items"})
+        status = await route_graph_candidates(db,
+            [{"skill": "order_support", "score": 1, "evidence": ["status"]}],
+            root_tool_keys={"order.details"})
+        self.assertEqual({row["key"] for row in categories["tools"]}, {"order.items", "order.details"})
+        self.assertEqual({row["key"] for row in status["tools"]}, {"order.details"})
+        self.assertNotIn("order.items", {row["key"] for row in status["tools"]})
+
     async def test_learning_record_falls_back_and_rolls_back_without_edge_writes(self):
         class ReadOnlyDB:
             def __init__(self): self.queries = []

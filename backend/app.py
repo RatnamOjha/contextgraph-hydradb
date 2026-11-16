@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from .config import load_env_file
 
@@ -24,7 +25,7 @@ from .hydra import HydraClient, HydraError
 from .registry import inspect_tools, seed_catalog, seed_olist_entities
 from .router import candidate_skills, classify, execute_fixture, expanded_flat_retrieve, flat_candidates, flat_retrieve, route_graph, route_graph_candidates, tool_json
 from .olist_store import DEFAULT_DB, available as olist_available, dataset_status, list_orders, lookup_order
-from .dataset_workflow import execute_deterministic, extract_order_id
+from .dataset_workflow import execute_deterministic, extract_order_id, required_tools
 from .groq_agent import run_groq_agent
 from .objectives import evaluate_answer, requested_objectives
 from .real_evaluation import compare_real_agent
@@ -121,6 +122,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="ContextGraph", version="0.1.0", lifespan=lifespan)
 WEB = Path(__file__).resolve().parents[1] / "web"
+app.mount("/assets", StaticFiles(directory=WEB), name="web-assets")
 
 
 def as_http_error(exc: Exception) -> HTTPException:
@@ -400,7 +402,8 @@ async def run_dataset_task(request: RunRequest) -> dict:
     resolved: list = []
     retrieval_ms = 0.0
     if request.method == "graph":
-        route = await route_graph_candidates(db, candidates, order_id)
+        route = await route_graph_candidates(db, candidates, order_id,
+            root_tool_keys=set(required_tools(request.task)))
         by_key = {tool.key: tool for tool in DATA_TOOLS}
         for row in route["tools"]:
             tool = by_key.get(row["key"])
@@ -967,14 +970,16 @@ async def learning_demo():
         test_task = f"Which purchased goods were included in source record {heldout}?"
         candidates = candidate_skills(train_task)
         baseline = await get_dependency_state(tool_key, dependency)
-        baseline_route = await route_graph_candidates(db, candidates, training)
+        baseline_route = await route_graph_candidates(db, candidates, training,
+            root_tool_keys=set(required_tools(train_task)))
         _validate_retrieval_edge(baseline_route, tool_key, dependency, expected=True, stage="baseline")
         update_id = int(time.time_ns() & ((1 << 62) - 1)) or 3
         await create_learning_experiment(update_id, tool_key, dependency, "fixture", training, heldout, baseline, train_task)
         finished = False
         try:
             experiment_state = {**baseline, "retrieval_exclusion": {"from": tool_key, "relationship_type": "DEPENDS_ON", "to": dependency}}
-            before_route = await route_graph_candidates(db, candidates, training, exclude_dependencies={(tool_key, dependency)})
+            before_route = await route_graph_candidates(db, candidates, training,
+                exclude_dependencies={(tool_key, dependency)}, root_tool_keys=set(required_tools(train_task)))
             _validate_retrieval_edge(before_route, tool_key, dependency, expected=False, stage="dependency-withheld")
             by_key = {tool.key: tool for tool in DATA_TOOLS}
             before_tools = [by_key[row["key"]] for row in before_route["tools"] if row["key"] in by_key]
@@ -1000,7 +1005,8 @@ async def learning_demo():
             await finish_learning_experiment(update_id, state="applied", evidence=evidence,
                 diagnosis="dependency_withheld_from_retrieval_then_filter_removed", post_state=corrected_state)
             after_candidates = candidate_skills(test_task)
-            after_route = await route_graph_candidates(db, after_candidates, heldout)
+            after_route = await route_graph_candidates(db, after_candidates, heldout,
+                root_tool_keys=set(required_tools(test_task)))
             _validate_retrieval_edge(after_route, tool_key, dependency, expected=True, stage="held-out retest")
             after_tools = [by_key[row["key"]] for row in after_route["tools"] if row["key"] in by_key]
             after = execute_deterministic(test_task, heldout, after_tools, DEFAULT_DB)
@@ -1058,7 +1064,8 @@ async def agent_learning_demo():
         test_task = f"Identify the goods and product categories for historical record {heldout}."
         candidates = candidate_skills(train_task)
         baseline = await get_dependency_state(tool_key, dependency)
-        baseline_route = await route_graph_candidates(db, candidates, training)
+        baseline_route = await route_graph_candidates(db, candidates, training,
+            root_tool_keys=set(required_tools(train_task)))
         _validate_retrieval_edge(baseline_route, tool_key, dependency, expected=True, stage="baseline")
         declared = next((tool for tool in DATA_TOOLS if tool.key == tool_key), None)
         if not declared or dependency not in declared.dependencies:
@@ -1069,7 +1076,8 @@ async def agent_learning_demo():
         experiment_state = None
         try:
             experiment_state = {**baseline, "retrieval_exclusion": {"from": tool_key, "relationship_type": "DEPENDS_ON", "to": dependency}}
-            before_route = await route_graph_candidates(db, candidates, training, exclude_dependencies={(tool_key, dependency)})
+            before_route = await route_graph_candidates(db, candidates, training,
+                exclude_dependencies={(tool_key, dependency)}, root_tool_keys=set(required_tools(train_task)))
             _validate_retrieval_edge(before_route, tool_key, dependency, expected=False, stage="dependency-withheld")
             by_key = {tool.key: tool for tool in DATA_TOOLS}
             before_keys = {row["key"] for row in before_route["tools"] if row["key"] in by_key}
@@ -1134,7 +1142,8 @@ async def agent_learning_demo():
             await finish_learning_experiment(update_id, state="applied", evidence=evidence,
                 diagnosis="dependency_withheld_from_retrieval_then_filter_removed", post_state=corrected_state)
             after_candidates = candidate_skills(test_task)
-            after_route = await route_graph_candidates(db, after_candidates, heldout)
+            after_route = await route_graph_candidates(db, after_candidates, heldout,
+                root_tool_keys=set(required_tools(test_task)))
             _validate_retrieval_edge(after_route, tool_key, dependency, expected=True, stage="held-out retest")
             after_keys = {row["key"] for row in after_route["tools"] if row["key"] in by_key}
             after_tools = [by_key[key] for key in sorted(after_keys)]
@@ -1300,5 +1309,110 @@ async def graph(scenario: str = "refund"):
             key = f"{entity['type']}:{entity['id']}"
             nodes[key] = {"id": key, "label": key, "type": "Entity"}
         return {"scenario": scenario, "skill": route["skill"], "nodes": list(nodes.values()), "edges": route["edges"], "resolved_entities": route["resolved_entities"]}
+    except Exception as exc:
+        raise as_http_error(exc) from exc
+
+
+@app.get("/api/graph/explore")
+async def graph_explore(task: str = "What is the status of this order?", order_id: str | None = None):
+    """Return a bounded, read-only subgraph for an Olist task and optional order."""
+    if len(task) < 8 or len(task) > 1200:
+        raise HTTPException(422, detail="Task must contain 8–1200 characters.")
+    if order_id and not re.fullmatch(r"[0-9a-f]{32}", order_id, re.I):
+        raise HTTPException(422, detail="Order ID must be a 32-character Olist identifier.")
+    try:
+        candidates = candidate_skills(task)
+        route = await route_graph_candidates(db, candidates, order_id, max_depth=4,
+            root_tool_keys=set(required_tools(task)))
+        nodes: dict[str, dict[str, Any]] = {}
+        edges: dict[tuple[str, str, str], dict[str, str]] = {}
+
+        def add_node(key: str, kind: str, **metadata: Any) -> None:
+            if key and key not in nodes and len(nodes) < 150:
+                nodes[key] = {"id": key, "label": key, "type": kind, "metadata": metadata}
+
+        def add_edge(source: str, target: str, relation: str) -> None:
+            if source in nodes and target in nodes and len(edges) < 300:
+                edges[(source, relation, target)] = {"from": source, "to": target, "type": relation}
+
+        for candidate in candidates:
+            key = candidate["skill"]
+            add_node(key, "Skill", score=candidate["score"], evidence=candidate["evidence"])
+        for tool in route["tools"]:
+            key = tool["key"]
+            definition = next((item for item in DATA_TOOLS if item.key == key), None)
+            add_node(key, "Tool", name=tool.get("name"), description=tool.get("description"),
+                input_schema=tool.get("schema"), server=tool.get("server"), mcp_server=tool.get("mcp"),
+                dependencies=list(definition.dependencies) if definition else [],
+                why=tool.get("why", []),
+                execution_provenance=("simulated_policy" if definition and definition.server == "contextgraph-simulated"
+                    else "dataset_backed" if definition else "legacy_fixture_only"))
+        for edge in route["edges"]:
+            source, target = edge.get("from"), edge.get("to")
+            if source in nodes and target not in nodes:
+                if edge.get("type") == "PROVIDED_BY":
+                    add_node(target, "MCPServer", name=target, transport="stdio", protocol="MCP")
+                else:
+                    add_node(target, "Tool")
+            elif target in nodes and source not in nodes and edge.get("type") == "REQUIRES":
+                add_node(source, "TaskType")
+            add_edge(source, target, edge.get("type", "RELATED"))
+
+        # Include only actual Agent -> Skill relationships for the candidate skills.
+        if candidates:
+            candidate_ids = [db.id_for("Skill", row["skill"]) for row in candidates]
+            _, agent_rows, _ = await db.query(
+                f"MATCH (a:Agent)-[:HAS_SKILL]->(s:Skill) WHERE s.id IN {candidate_ids} "
+                "RETURN a.key AS agent,s.key AS skill,a.name AS name,a.description AS description LIMIT 12")
+            for agent_key, skill_key, name, description in agent_rows:
+                add_node(agent_key, "Agent", name=name, description=description)
+                add_edge(agent_key, skill_key, "HAS_SKILL")
+
+        resolved = route.get("resolved_entities", [])
+        entity_keys = {}
+        for entity in resolved:
+            kind, external = entity["type"], entity["id"]
+            key = f"{kind}:{external}"
+            entity_keys[(kind, external)] = key
+            add_node(key, "Entity", entity_type=kind, external_id=external, source="olist")
+        order_key = entity_keys.get(("order", order_id)) if order_id else None
+        customer = next((entity for entity in resolved if entity["type"] == "customer"), None)
+        if order_key and customer:
+            customer_key = entity_keys.get(("customer", customer["id"]))
+            add_edge(order_key, customer_key, "BELONGS_TO")
+
+        # The order neighborhood is capped and read directly from the seeded Olist entity graph.
+        if order_id and order_key:
+            order_node_id = db.id_for("Entity", f"order:{order_id}")
+            _, item_rows, _ = await db.query(
+                "MATCH (o:Entity {id: $id})-[:HAS_ITEM]->(i:Entity) "
+                "RETURN o.key AS order_key,i.id AS item_id,i.key AS item_key,i.external_id AS external_id LIMIT 30",
+                {"id": order_node_id})
+            item_ids = []
+            for _, item_id, item_key, external_id in item_rows:
+                item_id = int(item_id)
+                item_ids.append(item_id)
+                add_node(item_key, "Entity", entity_type="order_item", external_id=external_id, source="olist")
+                add_edge(order_key, item_key, "HAS_ITEM")
+            if item_ids:
+                _, product_rows, _ = await db.query(
+                    f"MATCH (i:Entity)-[:ITEM_PRODUCT]->(p:Entity) WHERE i.id IN {sorted(set(item_ids))} "
+                    "RETURN i.key AS item_key,p.key AS product_key,p.external_id AS product_id LIMIT 60")
+                for item_key, product_key, product_id in product_rows:
+                    add_node(product_key, "Entity", entity_type="product", external_id=product_id, source="olist")
+                    add_edge(item_key, product_key, "ITEM_PRODUCT")
+                _, seller_rows, _ = await db.query(
+                    f"MATCH (i:Entity)-[:SOLD_BY]->(s:Entity) WHERE i.id IN {sorted(set(item_ids))} "
+                    "RETURN i.key AS item_key,s.key AS seller_key,s.external_id AS seller_id LIMIT 60")
+                for item_key, seller_key, seller_id in seller_rows:
+                    add_node(seller_key, "Entity", entity_type="seller", external_id=seller_id, source="olist")
+                    add_edge(item_key, seller_key, "SOLD_BY")
+
+        return {"task": task, "order_id": order_id, "skills": route["skills"],
+            "nodes": list(nodes.values()), "edges": list(edges.values()),
+            "resolved_entities": resolved, "retrieval_ms": round(route.get("retrieval_ms", 0), 3),
+            "bounded": {"max_nodes": 150, "max_edges": 300, "order_items": 30}}
+    except HTTPException:
+        raise
     except Exception as exc:
         raise as_http_error(exc) from exc
