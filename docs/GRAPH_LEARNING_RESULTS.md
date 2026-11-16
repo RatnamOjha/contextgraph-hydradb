@@ -35,6 +35,40 @@ The harness starts a separate HydraDB process with a new temporary store, runs t
 
 One correction was validated. There were zero regressions. Completion is scored by the deterministic objective evaluator against the Olist tool outputs. Context is an estimate derived from serialized tool definitions.
 
+## Regression controls
+
+These independent controls are run against the same initial edge-free and corrected edge snapshots. They are reported separately from the three dependency-recovery held-out tasks. The workflow's required tool set supplies the retrieval roots, and dependency closure is computed from each snapshot.
+
+| Control | Snapshot | Selected tools | Executed tools | Verified outcome | Dependency failures | Context estimate |
+|---|---|---|---|---:|---:|---:|
+| Details-only: “What is the status of order …?” | Before | `order.details` | `order.details` | 1/1 `SUCCESS` | 0 | 92 tokens |
+| Details-only | After | `order.details` | `order.details` | 1/1 `SUCCESS` | 0 | 92 tokens |
+| Payments: “Summarize payment methods, values, and installment counts …” | Before | `order.details`, `order.payments` | `order.details`, `order.payments` | 3/3 `SUCCESS` | 0 | 177 tokens |
+| Payments | After | `order.details`, `order.payments` | `order.details`, `order.payments` | 3/3 `SUCCESS` | 0 | 177 tokens |
+
+The corrected snapshot did not add `order.items` to either control. Completion, selected tools, and estimated context were unchanged in both; context overhead delta was 0 tokens. The payments workflow is a second unrelated negative control: it exercises payment method, value, and installment objectives while remaining independent of the `order.items → order.details` retrieval edge.
+
+## Paired same-order dependency-direction controls
+
+The paired run uses each of the same three held-out orders for both a status-only task and a product-category task. It is a separate regression experiment and does not change the original benchmark or count status tasks as dependency-recovery successes.
+
+| Task | Before correction | After correction | Verified completion | Context estimate |
+|---|---|---|---:|---:|
+| Status only, same 3 orders | Selected/executed `order.details`; `order.items` absent | Selected/executed `order.details`; `order.items` absent | 3/3 → 3/3 | 92 → 92 tokens |
+| Product categories, same 3 orders | Selected `order.items`; execution blocked by missing `order.details` | Selected `order.details` + `order.items`; executed `order.details` then `order.items` | 0/3 → 3/3 | 90 → 182 tokens |
+
+Each status answer remained byte-for-byte identical for its order and verified correctly before and after. Each category task reported the missing `order.items → order.details` prerequisite before correction, then returned verified Olist category evidence after correction. The 92-token category context increase is the prerequisite tool definition required to complete the task; no unrelated tool was added. Across all six paired task comparisons, no status tool-selection, execution, answer, or context regression was detected.
+
+The harness evaluates both edge snapshots in a fresh temporary HydraDB store. It keeps the original `order.items -[DEPENDS_ON]-> order.details` relationship direction; the executor runs the prerequisite `order.details` before `order.items`. The correction is deleted after the retest and the empty initial edge snapshot is confirmed by readback.
+
+Held-out order IDs and per-order outcomes:
+
+| Same order | Status before/after | Category before → after | Category context before → after |
+|---|---|---|---:|
+| `35a972d7f8436f405b56e36add1a7140` | `SUCCESS` / `SUCCESS` | `UNVERIFIED` → `SUCCESS` | 90 → 182 tokens |
+| `03ef5dedbe7492bdae72eec50764c43f` | `SUCCESS` / `SUCCESS` | `UNVERIFIED` → `SUCCESS` | 90 → 182 tokens |
+| `168626408cb32af0ffaf76711caae1dc` | `SUCCESS` / `SUCCESS` | `UNVERIFIED` → `SUCCESS` | 90 → 182 tokens |
+
 ## HydraDB mutation evidence
 
 The initial graph held the `order.items` and `order.details` tool nodes, but no `DEPENDS_ON` relationship. The relationship query returned no rows:
@@ -71,6 +105,8 @@ The same readback query returned no rows, matching the initial edge-free snapsho
 ## Limitations
 
 - This is a small, three-order deterministic experiment, not a Groq or statistical benchmark.
+- Regression controls use deterministic workflow-required roots and graph-edge closure, not a production natural-language retriever or a broad workload sample. Their unchanged tool/context counts establish this edge's direction-specific non-interference for these controls only.
+- The paired tasks are deterministic controls over the same three Olist orders. The category root is deliberately `order.items` so the prerequisite edge's direction can be isolated; this is not a general-purpose task-ranking evaluation.
 - The prerequisite was validated from declared tool metadata. This does not demonstrate autonomous dependency discovery.
 - The harness uses a temporary HydraDB process and store. It proves the mutation, readback, held-out retest, and rollback path locally; it is not a mutation against the shared Render graph.
 - The product API’s existing learning demo remains controlled dependency recovery: it withholds an existing edge through a request-scoped retrieval filter and does not mutate the graph.

@@ -21,7 +21,7 @@ HYDRA_SOURCE = ROOT / "hydradb-upstream"
 NODE = HYDRA_SOURCE / "target/debug/graph-node"
 sys.path.insert(0, str(ROOT))
 
-from backend.dataset_workflow import execute_deterministic
+from backend.dataset_workflow import execute_deterministic, required_tools
 from backend.fixtures import DATA_TOOLS
 from backend.hydra import HydraClient, HydraError
 from backend.objectives import evaluate_answer
@@ -85,6 +85,71 @@ async def update_learning_record(db: HydraClient, ident: int, state: str, eviden
         raise RuntimeError("Learning evidence update failed exact HydraDB readback")
 
 
+def dependency_closure(roots: list[str], edges: list[list[Any]]) -> set[str]:
+    """Expand the declared retrieval roots over the exact edge snapshot."""
+    selected = set(roots)
+    pending = list(roots)
+    while pending:
+        current = pending.pop()
+        for source, target, *_ in edges:
+            if source == current and target not in selected:
+                selected.add(target)
+                pending.append(target)
+    return selected
+
+
+def context_tokens(tools: list[Any]) -> int:
+    return sum(len(json.dumps(tool_json(tool), separators=(",", ":"))) for tool in tools) // 4
+
+
+def run_regression_control(task: str, order_id: str, edges: list[list[Any]], tools_by_key: dict[str, Any]) -> dict[str, Any]:
+    roots = required_tools(task)
+    selected_keys = dependency_closure(roots, edges)
+    selected = [tool for key, tool in tools_by_key.items() if key in selected_keys]
+    execution = execute_deterministic(task, order_id, selected)
+    outcome = evaluate_answer(task, execution["answer"], execution["tool_outputs"], entity_resolved=True)
+    return {
+        "selected_tools": sorted(selected_keys),
+        "executed_tools": sorted({row["tool"] for row in execution["tool_outputs"] if not row.get("error")}),
+        "outcome": {"code": outcome["code"], "success": outcome["code"] == "SUCCESS",
+            "verified_objectives": outcome.get("verified_objectives", []),
+            "total_objectives": outcome.get("total_objectives", 0)},
+        "dependency_failures": execution["dependency_failures"],
+        "tool_calls": execution["tool_calls"],
+        "context_tokens_est": context_tokens(selected),
+    }
+
+
+def run_paired_snapshot_task(task: str, order_id: str, roots: list[str], edges: list[list[Any]],
+                            tools_by_key: dict[str, Any]) -> dict[str, Any]:
+    selected_keys = dependency_closure(roots, edges)
+    selected = [tool for key, tool in tools_by_key.items() if key in selected_keys]
+    execution = execute_deterministic(task, order_id, selected)
+    outcome = evaluate_answer(task, execution["answer"], execution["tool_outputs"], entity_resolved=True)
+    return {
+        "selected_tools": sorted(selected_keys),
+        "executed_tools": list(dict.fromkeys(row["tool"] for row in execution["tool_outputs"] if not row.get("error"))),
+        "outcome": {"code": outcome["code"], "success": outcome["code"] == "SUCCESS",
+            "verified_objectives": outcome.get("verified_objectives", 0),
+            "total_objectives": outcome.get("total_objectives", 0),
+            "objectives": outcome.get("objectives", [])},
+        "answer": execution["answer"],
+        "dependency_failures": execution["dependency_failures"],
+        "tool_calls": execution["tool_calls"],
+        "context_tokens_est": context_tokens(selected),
+    }
+
+
+def control_regressions(before: dict[str, Any], after: dict[str, Any], expected_tools: list[str]) -> dict[str, Any]:
+    return {
+        "completion": before["outcome"]["success"] and not after["outcome"]["success"],
+        "tool_selection": before["selected_tools"] != after["selected_tools"] or after["selected_tools"] != expected_tools,
+        "context_overhead": after["context_tokens_est"] > before["context_tokens_est"],
+        "context_tokens_delta": after["context_tokens_est"] - before["context_tokens_est"],
+        "unexpected_order_items": "order.items" in after["selected_tools"],
+    }
+
+
 async def experiment(db: HydraClient, heldout_count: int) -> dict[str, Any]:
     runtime_probes: dict[str, Any] = {}
     try:
@@ -105,6 +170,7 @@ async def experiment(db: HydraClient, heldout_count: int) -> dict[str, Any]:
     training_id = training["order_id"]
     item_tool = next(tool for tool in DATA_TOOLS if tool.key == "order.items")
     details_tool = next(tool for tool in DATA_TOOLS if tool.key == "order.details")
+    payments_tool = next(tool for tool in DATA_TOOLS if tool.key == "order.payments")
     dependency = "order.details"
     if dependency not in item_tool.dependencies:
         raise RuntimeError("Proposed relationship is not declared in Tool.dependencies")
@@ -113,6 +179,8 @@ async def experiment(db: HydraClient, heldout_count: int) -> dict[str, Any]:
     rows = [
         {"id": src, "key": item_tool.key, "dependencies_json": json.dumps(list(item_tool.dependencies))},
         {"id": dst, "key": details_tool.key, "dependencies_json": json.dumps(list(details_tool.dependencies))},
+        {"id": db.id_for("Tool", payments_tool.key), "key": payments_tool.key,
+            "dependencies_json": json.dumps(list(payments_tool.dependencies))},
     ]
     await db.query("UNWIND $rows AS row MERGE (n {id: row.id}) "
                    "SET n:Tool,n.key=row.key,n.dependencies_json=row.dependencies_json", {"rows": rows})
@@ -223,6 +291,79 @@ async def experiment(db: HydraClient, heldout_count: int) -> dict[str, Any]:
     evidence["correction_status"] = "applied_and_validated"
     await update_learning_record(db, update_id, "validated", evidence)
 
+    # These independent workflows use the same edge snapshots as the held-out
+    # comparison. The dependency points from items to details, so a details or
+    # payment root must not pull items into its retrieved context.
+    tools_by_key = {tool.key: tool for tool in DATA_TOOLS}
+    control_tasks = {
+        "details_only": f"What is the status of order {heldout[0]['order_id']}?",
+        "payments": f"Summarize payment methods, values, and installment counts for order {heldout[0]['order_id']}.",
+    }
+    regression_controls: dict[str, Any] = {
+        "description": "Independent regression controls; not counted as dependency-recovery successes.",
+        "snapshots": {"before_edges": initial_edges, "after_edges": corrected_edges},
+    }
+    for name, task in control_tasks.items():
+        before = run_regression_control(task, heldout[0]["order_id"], initial_edges, tools_by_key)
+        after = run_regression_control(task, heldout[0]["order_id"], corrected_edges, tools_by_key)
+        expected_tools = before["selected_tools"]
+        regression_controls[name] = {
+            "task": task,
+            "before": before,
+            "after": after,
+            "regressions": control_regressions(before, after, expected_tools),
+        }
+
+    paired_rows: list[dict[str, Any]] = []
+    for order in heldout:
+        order_id = order["order_id"]
+        status_task = f"What is the status of order {order_id}?"
+        categories_task = f"Which goods categories appear in historical order {order_id}?"
+        status_before = run_paired_snapshot_task(status_task, order_id, [details_tool.key], initial_edges, tools_by_key)
+        status_after = run_paired_snapshot_task(status_task, order_id, [details_tool.key], corrected_edges, tools_by_key)
+        categories_before = run_paired_snapshot_task(categories_task, order_id, [item_tool.key], initial_edges, tools_by_key)
+        categories_after = run_paired_snapshot_task(categories_task, order_id, [item_tool.key], corrected_edges, tools_by_key)
+        expected_categories_after = sorted({item_tool.key, details_tool.key})
+        paired_rows.append({
+            "order_id": order_id,
+            "status_only": {
+                "task": status_task, "before": status_before, "after": status_after,
+                "regressions": {
+                    "completion": status_before["outcome"]["success"] and not status_after["outcome"]["success"],
+                    "tool_selection": status_before["selected_tools"] != [details_tool.key] or status_after["selected_tools"] != [details_tool.key],
+                    "execution": status_before["executed_tools"] != [details_tool.key] or status_after["executed_tools"] != [details_tool.key],
+                    "answer_consistency": status_before["answer"] != status_after["answer"],
+                    "answer_correctness": not status_before["outcome"]["success"] or not status_after["outcome"]["success"],
+                    "context_overhead": status_after["context_tokens_est"] > status_before["context_tokens_est"],
+                    "context_tokens_delta": status_after["context_tokens_est"] - status_before["context_tokens_est"],
+                    "unexpected_order_items": item_tool.key in status_after["selected_tools"],
+                },
+            },
+            "categories": {
+                "task": categories_task, "before": categories_before, "after": categories_after,
+                "regressions": {
+                    "completion": categories_before["outcome"]["success"] and not categories_after["outcome"]["success"],
+                    "tool_selection": categories_before["selected_tools"] != [item_tool.key] or categories_after["selected_tools"] != expected_categories_after,
+                    "execution": categories_after["executed_tools"] != [details_tool.key, item_tool.key],
+                    "prerequisite_failure_before": not any(row.get("tool") == item_tool.key and row.get("missing_dependency") == details_tool.key
+                        for row in categories_before["dependency_failures"]),
+                    "prerequisite_satisfied_after": bool(categories_after["dependency_failures"]),
+                    "answer_correctness_after": not categories_after["outcome"]["success"],
+                    "context_overhead": categories_after["context_tokens_est"] > context_tokens([details_tool, item_tool]),
+                    "context_tokens_delta": categories_after["context_tokens_est"] - categories_before["context_tokens_est"],
+                },
+            },
+        })
+    paired_controls = {
+        "description": "Same-order paired dependency-direction experiment; separately reported from the original held-out benchmark.",
+        "snapshots": {"before_edges": initial_edges, "after_edges": corrected_edges},
+        "status_only_completion_before": round(sum(row["status_only"]["before"]["outcome"]["success"] for row in paired_rows) / len(paired_rows), 3),
+        "status_only_completion_after": round(sum(row["status_only"]["after"]["outcome"]["success"] for row in paired_rows) / len(paired_rows), 3),
+        "categories_completion_before": round(sum(row["categories"]["before"]["outcome"]["success"] for row in paired_rows) / len(paired_rows), 3),
+        "categories_completion_after": round(sum(row["categories"]["after"]["outcome"]["success"] for row in paired_rows) / len(paired_rows), 3),
+        "cases": paired_rows,
+    }
+
     await db.query("MATCH (a:Tool {id: $src})-[r:DEPENDS_ON]->(b:Tool {id: $dst}) DELETE r",
                    {"src": src, "dst": dst})
     restored_edges = await query_state(db, src, dst)
@@ -262,6 +403,8 @@ async def experiment(db: HydraClient, heldout_count: int) -> dict[str, Any]:
         "training_failure": training_run["dependency_failures"],
         "heldout_initial": before_rows,
         "heldout_corrected": after_rows,
+        "regression_controls": regression_controls,
+        "paired_same_order_controls": paired_controls,
         "rollback": {"restored_edges": restored_edges, "graph_restored": restored_edges == initial_edges},
         "learning_record": {"id": update_id, "state": "rolled_back", "readback_confirmed": True},
         "real_model_calls": 0,
