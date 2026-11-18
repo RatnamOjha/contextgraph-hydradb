@@ -3,13 +3,14 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#0c1111" />
-    <meta name="description" content="ContextGraph retrieves dependency-aware context for agents, executes tools against historical business data, and verifies answers against evidence." />
-    <title>ContextGraph — agent context, retrieved</title>
+    <meta name="theme-color" content="#f5f2e9" />
+    <meta name="description" content="ContextGraph gives customer-support agents the right tools and source-backed context for each order question." />
+    <title>ContextGraph — useful context, with receipts</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700;800&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/assets/styles.css" />
+    <link rel="stylesheet" href="/assets/brand.css" />
   </head>
   <body>
     <div class="app-shell">
@@ -19,8 +20,8 @@
           <span>ContextGraph<small>AGENT CONTEXT LAYER</small></span>
         </a>
         <div class="nav-label">WORKSPACE</div>
-        <nav class="nav-list">
-          <button class="nav-item active" data-page="overview"><span class="nav-icon">◫</span>Overview</button>
+        <nav class="nav-list" aria-label="Product navigation">
+          <button class="nav-item active" data-page="overview"><span class="nav-icon">✳</span>Ask</button>
           <button class="nav-item" data-page="playground"><span class="nav-icon">⌘</span>Playground</button>
           <button class="nav-item" data-page="graph"><span class="nav-icon">⌘</span>Graph Explorer</button>
           <button class="nav-item" data-page="learning"><span class="nav-icon">↗</span>Learning Lab</button>
@@ -30,7 +31,6 @@
         </nav>
         <div class="sidebar-bottom">
           <div class="system-status"><i id="healthDot"></i><div><b id="healthText">Connecting</b><small>HydraDB graph store</small></div></div>
-          <div class="sidebar-note">Historical Olist data · read-only<br/>ContextGraph demo environment</div>
           <button id="themeToggle" class="theme-toggle" type="button" aria-label="Toggle light theme">◐ <span>Appearance</span></button>
         </div>
       </aside>
@@ -38,19 +38,42 @@
       <main class="main-content">
         <header class="topbar">
           <div class="mobile-brand"><span class="brand-mark mini">◇</span>ContextGraph</div>
-          <div class="breadcrumbs"><span>Workspace</span><b>/</b><strong id="pageCrumb">Overview</strong></div>
+          <div class="breadcrumbs"><span>Workspace</span><b>/</b><strong id="pageCrumb">Ask</strong></div>
           <div class="topbar-actions"><span class="top-pill"><i></i>API <b id="apiState">checking</b></span><a class="github-link" href="https://github.com/RatnamOjha/contextgraph-hydradb" target="_blank" rel="noreferrer">GitHub ↗</a></div>
           <button id="mobileMenu" class="mobile-menu" aria-label="Open navigation">☰</button>
         </header>
 
         <section class="page active" id="page-overview">
-          <div class="page-heading overview-heading"><div><div class="eyebrow">HYDRADB · AGENT CONTEXT LAYER</div><h1>Give agents the right context.<br/><em>Not every tool.</em></h1><p>ContextGraph routes tasks through a relationship graph, expands required tools, and verifies the answer against historical business data.</p><div class="heading-actions"><button class="button primary" data-go="playground">Try the Playground <span>→</span></button><button class="button secondary" data-go="graph">Explore the graph</button></div></div>
-            <div class="hero-visual" aria-label="ContextGraph routes a request to only required tools"><div class="orbit orbit-a"></div><div class="orbit orbit-b"></div><div class="hero-chip task-chip"><small>REQUEST</small>Order status?</div><div class="hero-core"><span>◇</span><small>CONTEXT<br/>GRAPH</small></div><div class="hero-chip tool-chip"><i></i>order.details</div><div class="hero-chip muted-tool"><i></i>order.items <small>not needed</small></div><div class="hero-caption">RETRIEVE ONLY WHAT THE TASK NEEDS</div></div></div>
-          <div class="stat-strip"><div><small>DATASET</small><b id="overviewDataset">Olist historical orders</b></div><div><small>EXECUTION MODES</small><b>Deterministic + Groq</b></div><div><small>GRAPH STORE</small><b>HydraDB</b></div><div><small>ANSWER CHECK</small><b>Objective-level evidence</b></div></div>
-          <div class="section-title"><div><div class="eyebrow">THE REQUEST PATH</div><h2>From task to verified answer</h2></div><span class="section-caption">Actual registered tools · real dataset-backed execution</span></div>
-          <div class="flow-cards"><article><span class="step-no">01</span><div class="flow-icon">✳</div><h3>Understand the task</h3><p>Candidate skills are matched from the request to find a narrow route through the catalog.</p></article><div class="flow-arrow">→</div><article><span class="step-no">02</span><div class="flow-icon">⌘</div><h3>Expand prerequisites</h3><p>HydraDB follows directional <code>DEPENDS_ON</code> edges to include required context.</p></article><div class="flow-arrow">→</div><article><span class="step-no">03</span><div class="flow-icon">↗</div><h3>Execute & verify</h3><p>Tools read Olist records. Requested facts are checked against returned source evidence.</p></article></div>
-          <div class="overview-bottom"><article class="panel architecture-panel"><div class="panel-head"><div><div class="eyebrow">SYSTEM MAP</div><h2>Context in. Evidence out.</h2></div><span class="live-tag"><i></i>LIVE ARCHITECTURE</span></div><div class="architecture-flow"><span class="arch-node">Task</span><b>→</b><span class="arch-node graph-node">Router<br/><small>HydraDB</small></span><b>→</b><span class="arch-node">Retrieved tools</span><b>→</b><span class="arch-node">Olist records</span><b>→</b><span class="arch-node verify-node">Evidence check</span></div></article><article class="panel quick-panel"><div class="eyebrow">QUICK ACCESS</div><button data-go="playground"><span>⌘</span><div><b>Run an order workflow</b><small>Explore graph-routed execution</small></div><strong>→</strong></button><button data-go="learning"><span>↗</span><div><b>See dependency recovery</b><small>Inspect the controlled experiment</small></div><strong>→</strong></button></article></div>
-          <div class="honesty-note"><span>i</span><p><b>What the demo proves</b> Tools execute against historical Olist records and requested objectives are checked against returned evidence. Learning Lab separates retrieval filtering from persisted graph mutation.</p></div>
+          <div class="ask-hero">
+            <div class="ask-copy">
+              <div class="eyebrow"><span class="eyebrow-dot"></span>CONTEXTGRAPH · VERIFIED TOOL ROUTING</div>
+              <h1>Give your agent<br/>the <em>right context.</em></h1>
+              <p>Find the tools a customer question actually needs. Follow their prerequisites. Check the answer against the source record.</p>
+              <div class="heading-actions"><button class="button primary" data-go="playground">Ask about an order <span>↗</span></button><button class="button text-button" data-go="graph">See how routing works <span>→</span></button></div>
+              <div class="ask-proof"><span><i></i>Historical commerce data</span><span><i></i>Evidence checked per objective</span></div>
+            </div>
+            <div class="hero-visual route-visual" aria-label="A product category question follows the order details prerequisite before reading order items">
+              <div class="route-card">
+                <div class="route-card-top"><span class="route-window"><i></i><i></i><i></i></span><span>ROUTING EXAMPLE</span><span class="route-index">STEP 01 / 02</span></div>
+                <div class="route-request"><small>REQUEST</small><b>Which categories were<br/>in this order?</b><span>Historical order · Olist</span></div>
+                <svg class="route-lines" viewBox="0 0 420 210" role="img" aria-label="Dependency graph: order.items depends on order.details">
+                  <path class="route-line main-line" d="M106 36 C180 36 165 105 235 105 S286 174 350 174"/>
+                  <path class="route-line soft-line" d="M106 36 C175 36 170 36 235 36"/>
+                  <circle class="route-glow" cx="235" cy="105" r="31"/>
+                </svg>
+                <div class="route-node task-node"><span>Task</span><b>categories</b></div>
+                <div class="route-node details-node"><span>TOOL · 01</span><b>order.details</b><small>required first</small></div>
+                <div class="route-node items-node"><span>TOOL · 02</span><b>order.items</b><small>answer source</small></div>
+                <div class="route-evidence"><span class="evidence-check">✓</span><div><small>ANSWER CHECK</small><b>Source evidence matched</b></div><span class="evidence-tag">VERIFIED</span></div>
+                <span class="route-stamp">DEPENDENCIES IN ORDER</span>
+              </div>
+              <div class="hero-orbit orbit-one"></div><div class="hero-orbit orbit-two"></div>
+            </div>
+          </div>
+          <div class="ask-ribbon"><div><small>THE PRODUCT</small><b>Context for customer-support agents</b></div><span class="ribbon-arrow">↗</span><div><small>THE WEDGE</small><b>Useful context, with receipts</b></div><span class="ribbon-arrow">↗</span><div><small>THE DEMO DATA</small><b id="overviewDataset">Olist historical orders</b></div></div>
+          <div class="section-title ask-section-title"><div><div class="eyebrow">ONE QUESTION · FOUR VISIBLE STEPS</div><h2>From customer request to a checked answer</h2></div><button class="inline-link" data-go="playground">Run the workflow <span>→</span></button></div>
+          <div class="flow-cards ask-flow"><article><span class="step-no">01</span><div class="flow-icon">✳</div><h3>Understand</h3><p>Match the request to a focused task and its likely source.</p></article><div class="flow-arrow">→</div><article><span class="step-no">02</span><div class="flow-icon">⌘</div><h3>Retrieve</h3><p>Follow only the dependency edges needed to supply that source.</p></article><div class="flow-arrow">→</div><article><span class="step-no">03</span><div class="flow-icon">↗</div><h3>Execute</h3><p>Read the selected historical order data in dependency order.</p></article><div class="flow-arrow">→</div><article><span class="step-no">04</span><div class="flow-icon">✓</div><h3>Verify</h3><p>Compare each requested fact with the tool result that supports it.</p></article></div>
+          <div class="ask-bottom"><article class="ask-note"><div class="eyebrow">A BETTER DEFAULT FOR AGENTS</div><h2>Every included tool has a reason.</h2><p>Graph relationships add prerequisite context only when the task needs it. The answer checker keeps a successful tool call separate from a verified answer.</p><button class="inline-link" data-go="learning">See the controlled learning result <span>→</span></button></article><article class="ask-live"><div class="ask-live-mark"><span>↗</span></div><div><small>TRY THE LIVE DEMO</small><b>Ask a real question about a historical order.</b><p>Choose a record, run deterministic execution, and inspect its source evidence.</p></div><button class="button dark-button" data-go="playground">Open Playground <span>→</span></button></article></div>
         </section>
 
         <section class="page" id="page-playground">
@@ -59,7 +82,7 @@
             <label class="field-label" for="orderSelect">Historical order</label><select id="orderSelect" class="control"><option value="">Loading Olist orders…</option></select>
             <label class="field-label" for="taskInput">Task</label><textarea id="taskInput" class="control task-input">Summarize this order's status, payment total, and delivery timing.</textarea>
             <div class="example-label">START WITH AN EXAMPLE</div><div class="example-list"><button data-task="What is the status of this order?">Order status <span>›</span></button><button data-task="Which product categories were purchased in this order?">Product categories <span>›</span></button><button data-task="Compare payment methods and installment amounts for this order.">Payment details <span>›</span></button><button data-task="Was this order delivered late? Compare the promised and actual dates.">Delivery check <span>›</span></button></div>
-            <div class="divider"></div><div class="field-label">Execution mode</div><div class="segmented"><button class="selected" data-mode="fixture"><b>Deterministic</b><small>Repeatable, no provider call</small></button><button data-mode="agent"><b>Real Groq</b><small>Model-selected tool calls</small></button></div><div id="providerNote" class="provider-note">Fixture mode · deterministic Olist tool runner. Groq is not called.</div>
+            <div class="divider"></div><div class="field-label">Execution mode</div><div class="segmented"><button class="selected" data-mode="fixture"><b>Deterministic</b><small>Repeatable, no provider call</small></button><button data-mode="agent"><b>Live agent</b><small>Model-selected tool calls</small></button></div><div id="providerNote" class="provider-note">Fixture mode · deterministic Olist tool runner. No model provider is called.</div>
             <label class="field-label" for="retrievalSelect">Retrieval strategy</label><select id="retrievalSelect" class="control"><option value="graph">HydraDB dependency graph</option><option value="flat">Flat lexical</option><option value="expanded_flat">Flat + dependency expansion</option></select>
             <button class="button primary run-button" id="runTask">Run workflow <span>→</span></button><div id="runError" class="inline-error" role="alert" hidden></div>
           </aside>

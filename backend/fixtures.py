@@ -152,6 +152,14 @@ EVALUATION_CASES = [
     {"name": "delivery_missing_entity", "scenario": "delivery", "task": "A shipment is late and a return may be pending. Find the carrier event and return authorization.", "entity_expected": False},
 ]
 
-def make_catalog(size: int = 20) -> list[Tool]:
-    """Return executable domain tools; `size` is accepted for API compatibility."""
-    return [*CORE_TOOLS, *DATA_TOOLS]
+def make_catalog(size: int = 20, scope: str = "combined") -> list[Tool]:
+    """Return the dummy-company catalog or the combined company/Olist catalog."""
+    if scope == "company":
+        return list(CORE_TOOLS)
+    if scope != "combined":
+        raise ValueError(f"Unknown catalog scope: {scope}")
+    # Keep the company definition when a combined catalog has a colliding key.
+    unique: dict[str, Tool] = {}
+    for tool in [*CORE_TOOLS, *DATA_TOOLS]:
+        unique.setdefault(tool.key, tool)
+    return list(unique.values())

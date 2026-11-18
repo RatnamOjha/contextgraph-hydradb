@@ -1,0 +1,433 @@
+{
+  "methodology": {
+    "company": "Fictional Acme Support: Support Desk, Commerce, Billing, and Shipping MCP catalogs",
+    "catalog_scope": "company only; 18 synthetic MCP tool definitions; no Olist tools",
+    "cases": [
+      "refund",
+      "billing",
+      "delivery"
+    ],
+    "execution": "deterministic fixture mode; same three tasks for every retrieval method",
+    "token_measurement": "estimated tokens from serialized selected tool definitions using the app's UTF-8 JSON character-count / 4 approximation; excludes system/user prompts, results, and generated answers",
+    "unnecessary_call_measurement": "counts any actually executed fixture tool not in that task's declared required-tool list",
+    "provider_calls": 0
+  },
+  "summary": {
+    "full": {
+      "completion": "3/3",
+      "mean_tool_context_tokens_est": 1661,
+      "mean_unnecessary_tools_exposed": 13,
+      "mean_executed_tool_calls": 5,
+      "total_unnecessary_executed_calls": 0,
+      "mean_tool_recall": 1.0
+    },
+    "flat": {
+      "completion": "0/3",
+      "mean_tool_context_tokens_est": 743,
+      "mean_unnecessary_tools_exposed": 4.7,
+      "mean_executed_tool_calls": 0.67,
+      "total_unnecessary_executed_calls": 0,
+      "mean_tool_recall": 0.672
+    },
+    "expanded_flat": {
+      "completion": "1/3",
+      "mean_tool_context_tokens_est": 712.7,
+      "mean_unnecessary_tools_exposed": 3.3,
+      "mean_executed_tool_calls": 4.33,
+      "total_unnecessary_executed_calls": 0,
+      "mean_tool_recall": 0.861
+    },
+    "graph": {
+      "completion": "3/3",
+      "mean_tool_context_tokens_est": 737.7,
+      "mean_unnecessary_tools_exposed": 4.7,
+      "mean_executed_tool_calls": 3.33,
+      "total_unnecessary_executed_calls": 0,
+      "mean_tool_recall": 1.0
+    }
+  },
+  "full_vs_graph": {
+    "mean_tool_context_token_reduction_pct": 55.6,
+    "mean_executed_call_reduction_pct": 33.4,
+    "task_completion_preserved": true
+  },
+  "cases": [
+    {
+      "scenario": "refund",
+      "task": "Ticket T-2049: find the customer, retrieve their recent order, and determine whether the order qualifies for a refund. Do not issue a refund.",
+      "methods": {
+        "full": {
+          "success": true,
+          "tool_context_tokens_est": 1661,
+          "unnecessary_tools_exposed": 13,
+          "tool_recall": 1.0,
+          "executed_tool_calls": 5,
+          "unnecessary_executed_calls": 0,
+          "selected_tools": [
+            "ticket.lookup",
+            "customer.resolve",
+            "customer.profile",
+            "orders.list",
+            "order.get",
+            "refund.eligibility",
+            "refund.create",
+            "invoice.lookup",
+            "payment.history",
+            "subscription.status",
+            "shipment.track",
+            "return.status",
+            "policy.search",
+            "ticket.reply",
+            "customer.note",
+            "payment.reverse",
+            "order.cancel",
+            "shipment.address"
+          ],
+          "executed_tools": [
+            "ticket.lookup",
+            "customer.resolve",
+            "orders.list",
+            "order.get",
+            "refund.eligibility"
+          ],
+          "resolved_entities": []
+        },
+        "flat": {
+          "success": false,
+          "tool_context_tokens_est": 735,
+          "unnecessary_tools_exposed": 5,
+          "tool_recall": 0.6,
+          "executed_tool_calls": 1,
+          "unnecessary_executed_calls": 0,
+          "selected_tools": [
+            "ticket.lookup",
+            "refund.create",
+            "policy.search",
+            "invoice.lookup",
+            "orders.list",
+            "order.get",
+            "shipment.track",
+            "return.status"
+          ],
+          "executed_tools": [
+            "ticket.lookup"
+          ],
+          "resolved_entities": []
+        },
+        "expanded_flat": {
+          "success": true,
+          "tool_context_tokens_est": 754,
+          "unnecessary_tools_exposed": 3,
+          "tool_recall": 1.0,
+          "executed_tool_calls": 5,
+          "unnecessary_executed_calls": 0,
+          "selected_tools": [
+            "ticket.lookup",
+            "refund.create",
+            "policy.search",
+            "invoice.lookup",
+            "orders.list",
+            "customer.resolve",
+            "refund.eligibility",
+            "order.get"
+          ],
+          "executed_tools": [
+            "ticket.lookup",
+            "customer.resolve",
+            "orders.list",
+            "order.get",
+            "refund.eligibility"
+          ],
+          "resolved_entities": []
+        },
+        "graph": {
+          "success": true,
+          "tool_context_tokens_est": 767,
+          "unnecessary_tools_exposed": 5,
+          "tool_recall": 1.0,
+          "executed_tool_calls": 3,
+          "unnecessary_executed_calls": 0,
+          "selected_tools": [
+            "customer.note",
+            "customer.profile",
+            "order.get",
+            "policy.search",
+            "refund.create",
+            "refund.eligibility",
+            "ticket.lookup",
+            "ticket.reply"
+          ],
+          "executed_tools": [
+            "ticket.lookup",
+            "order.get",
+            "refund.eligibility"
+          ],
+          "resolved_entities": [
+            {
+              "type": "ticket",
+              "id": "T-2049"
+            },
+            {
+              "type": "customer",
+              "id": "C-1042"
+            },
+            {
+              "type": "order",
+              "id": "O-8891"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "scenario": "billing",
+      "task": "Customer C-1042 says the latest charge looks wrong. Find the account, invoice, and payment events and summarize what happened.",
+      "methods": {
+        "full": {
+          "success": true,
+          "tool_context_tokens_est": 1661,
+          "unnecessary_tools_exposed": 14,
+          "tool_recall": 1.0,
+          "executed_tool_calls": 4,
+          "unnecessary_executed_calls": 0,
+          "selected_tools": [
+            "ticket.lookup",
+            "customer.resolve",
+            "customer.profile",
+            "orders.list",
+            "order.get",
+            "refund.eligibility",
+            "refund.create",
+            "invoice.lookup",
+            "payment.history",
+            "subscription.status",
+            "shipment.track",
+            "return.status",
+            "policy.search",
+            "ticket.reply",
+            "customer.note",
+            "payment.reverse",
+            "order.cancel",
+            "shipment.address"
+          ],
+          "executed_tools": [
+            "customer.resolve",
+            "customer.profile",
+            "invoice.lookup",
+            "payment.history"
+          ],
+          "resolved_entities": []
+        },
+        "flat": {
+          "success": false,
+          "tool_context_tokens_est": 741,
+          "unnecessary_tools_exposed": 5,
+          "tool_recall": 0.75,
+          "executed_tool_calls": 0,
+          "unnecessary_executed_calls": 0,
+          "selected_tools": [
+            "payment.history",
+            "invoice.lookup",
+            "ticket.lookup",
+            "shipment.track",
+            "policy.search",
+            "orders.list",
+            "customer.profile",
+            "refund.create"
+          ],
+          "executed_tools": [],
+          "resolved_entities": []
+        },
+        "expanded_flat": {
+          "success": false,
+          "tool_context_tokens_est": 628,
+          "unnecessary_tools_exposed": 4,
+          "tool_recall": 0.75,
+          "executed_tool_calls": 3,
+          "unnecessary_executed_calls": 0,
+          "selected_tools": [
+            "payment.history",
+            "invoice.lookup",
+            "ticket.lookup",
+            "shipment.track",
+            "policy.search",
+            "orders.list",
+            "customer.resolve"
+          ],
+          "executed_tools": [
+            "customer.resolve",
+            "invoice.lookup",
+            "payment.history"
+          ],
+          "resolved_entities": []
+        },
+        "graph": {
+          "success": true,
+          "tool_context_tokens_est": 545,
+          "unnecessary_tools_exposed": 3,
+          "tool_recall": 1.0,
+          "executed_tool_calls": 3,
+          "unnecessary_executed_calls": 0,
+          "selected_tools": [
+            "customer.note",
+            "customer.profile",
+            "invoice.lookup",
+            "payment.history",
+            "payment.reverse",
+            "subscription.status"
+          ],
+          "executed_tools": [
+            "customer.profile",
+            "invoice.lookup",
+            "payment.history"
+          ],
+          "resolved_entities": [
+            {
+              "type": "ticket",
+              "id": "T-2049"
+            },
+            {
+              "type": "customer",
+              "id": "C-1042"
+            },
+            {
+              "type": "order",
+              "id": "O-8891"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "scenario": "delivery",
+      "task": "Support ticket T-2049 reports a late package. Resolve the customer, find the order, and check the carrier scan and return state.",
+      "methods": {
+        "full": {
+          "success": true,
+          "tool_context_tokens_est": 1661,
+          "unnecessary_tools_exposed": 12,
+          "tool_recall": 1.0,
+          "executed_tool_calls": 6,
+          "unnecessary_executed_calls": 0,
+          "selected_tools": [
+            "ticket.lookup",
+            "customer.resolve",
+            "customer.profile",
+            "orders.list",
+            "order.get",
+            "refund.eligibility",
+            "refund.create",
+            "invoice.lookup",
+            "payment.history",
+            "subscription.status",
+            "shipment.track",
+            "return.status",
+            "policy.search",
+            "ticket.reply",
+            "customer.note",
+            "payment.reverse",
+            "order.cancel",
+            "shipment.address"
+          ],
+          "executed_tools": [
+            "ticket.lookup",
+            "customer.resolve",
+            "orders.list",
+            "order.get",
+            "shipment.track",
+            "return.status"
+          ],
+          "resolved_entities": []
+        },
+        "flat": {
+          "success": false,
+          "tool_context_tokens_est": 753,
+          "unnecessary_tools_exposed": 4,
+          "tool_recall": 0.667,
+          "executed_tool_calls": 1,
+          "unnecessary_executed_calls": 0,
+          "selected_tools": [
+            "ticket.lookup",
+            "shipment.track",
+            "refund.eligibility",
+            "refund.create",
+            "policy.search",
+            "return.status",
+            "orders.list",
+            "invoice.lookup"
+          ],
+          "executed_tools": [
+            "ticket.lookup"
+          ],
+          "resolved_entities": []
+        },
+        "expanded_flat": {
+          "success": false,
+          "tool_context_tokens_est": 756,
+          "unnecessary_tools_exposed": 3,
+          "tool_recall": 0.833,
+          "executed_tool_calls": 5,
+          "unnecessary_executed_calls": 0,
+          "selected_tools": [
+            "ticket.lookup",
+            "shipment.track",
+            "refund.eligibility",
+            "refund.create",
+            "policy.search",
+            "order.get",
+            "orders.list",
+            "customer.resolve"
+          ],
+          "executed_tools": [
+            "ticket.lookup",
+            "customer.resolve",
+            "orders.list",
+            "order.get",
+            "shipment.track"
+          ],
+          "resolved_entities": []
+        },
+        "graph": {
+          "success": true,
+          "tool_context_tokens_est": 901,
+          "unnecessary_tools_exposed": 6,
+          "tool_recall": 1.0,
+          "executed_tool_calls": 4,
+          "unnecessary_executed_calls": 0,
+          "selected_tools": [
+            "customer.note",
+            "customer.profile",
+            "order.cancel",
+            "policy.search",
+            "return.status",
+            "shipment.address",
+            "shipment.track",
+            "ticket.lookup",
+            "ticket.reply",
+            "order.get"
+          ],
+          "executed_tools": [
+            "ticket.lookup",
+            "order.get",
+            "shipment.track",
+            "return.status"
+          ],
+          "resolved_entities": [
+            {
+              "type": "ticket",
+              "id": "T-2049"
+            },
+            {
+              "type": "customer",
+              "id": "C-1042"
+            },
+            {
+              "type": "order",
+              "id": "O-8891"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

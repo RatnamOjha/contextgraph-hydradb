@@ -28,7 +28,7 @@ Import the official Olist archive into the documented 500-order subset:
 python scripts/import_olist.py --archive data/raw/olist.zip --output data/olist_demo.sqlite --orders 500
 ```
 
-Start the local stack with `./scripts/dev.sh`, then open [http://127.0.0.1:8000](http://127.0.0.1:8000). Unit tests run with:
+Start the local stack with `./scripts/dev.sh`, then open [http://127.0.0.1:8000](http://127.0.0.1:8000). The dev script uses HydraDB's in-memory provider by default and reseeds it at startup. Set `CONTEXTGRAPH_HYDRA_PROVIDER=local` to use the filesystem store instead. To run the isolated synthetic-company demo, set `CONTEXTGRAPH_CATALOG_SCOPE=company`; compare the full catalog, flat retrieval, and graph retrieval with [`scripts/benchmark_company.py`](scripts/benchmark_company.py). See the measured results and limitations in [`docs/DEMO_COMPANY_BENCHMARK.md`](docs/DEMO_COMPANY_BENCHMARK.md). Unit tests run with:
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -v

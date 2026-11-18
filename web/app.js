@@ -8,7 +8,7 @@ const api = async (path, options = {}) => {
   return payload;
 };
 const state = {page:"overview", mode:"fixture", orders:[], tools:[], graph:null, selectedNode:null, graphFocus:null, graphPan:{x:0,y:0}, graphScale:1, graphPointer:null, agentStatus:null};
-const nodeColors = {Agent:"#8769c5",TaskType:"#477db3",Skill:"#3978ab",Tool:"#3c9b70",MCPServer:"#b28a3d",Entity:"#8d7445"};
+const nodeColors = {Agent:"#bda0ff",TaskType:"#86c9ff",Skill:"#8abaff",Tool:"#70d6a4",MCPServer:"#f6c96d",Entity:"#c5a675"};
 const taskBySkill = {order_support:"What is the status of this order?",product_research:"Which product categories were purchased in this order?",billing_review:"Compare payment methods and installment amounts for this order.",delivery_investigation:"Was this order delivered late? Compare the promised and actual dates.",customer_context:"Which other orders did this customer place?",refund_review:"Check refund eligibility for this order using the demo policy."};
 
 function navigate(page) {
@@ -16,7 +16,7 @@ function navigate(page) {
   state.page=page;
   $$(".page").forEach(el=>el.classList.toggle("active",el.id===`page-${page}`));
   $$(".nav-item").forEach(el=>el.classList.toggle("active",el.dataset.page===page));
-  const label={overview:"Overview",playground:"Playground",graph:"Graph Explorer",learning:"Learning Lab",registry:"Tool Registry",evaluations:"Evaluations",docs:"Documentation"}[page];
+  const label={overview:"Ask",playground:"Playground",graph:"Graph Explorer",learning:"Learning Lab",registry:"Tool Registry",evaluations:"Evaluations",docs:"Documentation"}[page];
   $("#pageCrumb").textContent=label;
   document.body.classList.remove("nav-open");
   if(page==="graph"&&!state.graph) loadGraph();
@@ -25,7 +25,7 @@ function navigate(page) {
 $$('[data-page]').forEach(el=>el.addEventListener("click",e=>{e.preventDefault();navigate(el.dataset.page)}));
 $$('[data-go]').forEach(el=>el.addEventListener("click",()=>navigate(el.dataset.go)));
 $("#mobileMenu").addEventListener("click",()=>document.body.classList.toggle("nav-open"));
-$("#themeToggle").addEventListener("click",()=>document.body.classList.toggle("light"));
+$("#themeToggle").addEventListener("click",()=>document.body.classList.toggle("night"));
 
 async function loadHealth(){
   const dot=$("#healthDot"),text=$("#healthText"),apiText=$("#apiState");
@@ -44,8 +44,8 @@ async function loadOrders(){
 function updateModeNote(){
   const note=$("#providerNote"),stamp=$("#playModeStamp"),modeButton=$(`[data-mode="${state.mode}"]`);
   $$(".segmented button").forEach(b=>b.classList.toggle("selected",b===modeButton));
-  if(state.mode==="fixture") {note.textContent="Deterministic fixture · repeatable Olist tool runner. Groq is not called.";note.classList.remove("agent");stamp.textContent="DETERMINISTIC FIXTURE";stamp.className="mode-stamp fixture"}
-  else {const ready=!!state.agentStatus?.available;note.textContent=ready?`Real Groq agent · ${state.agentStatus.model} · provider calls may incur usage.`:"Real Groq is not configured or the dataset is unavailable. Runs fail explicitly; there is no fixture fallback.";note.classList.add("agent");stamp.textContent="REAL GROQ AGENT";stamp.className="mode-stamp";$("#retrievalSelect").value="graph";$("#retrievalSelect").disabled=true}
+  if(state.mode==="fixture") {note.textContent="Deterministic fixture · repeatable Olist tool runner. No model provider is called.";note.classList.remove("agent");stamp.textContent="DETERMINISTIC FIXTURE";stamp.className="mode-stamp fixture"}
+  else {note.textContent="Live agent mode uses the server-configured model and may incur usage. There is no fixture fallback.";note.classList.add("agent");stamp.textContent="LIVE AGENT";stamp.className="mode-stamp";$("#retrievalSelect").value="graph";$("#retrievalSelect").disabled=true}
   if(state.mode==="fixture")$("#retrievalSelect").disabled=false;
   $("#runTask").classList.toggle("agent",state.mode==="agent");
 }
@@ -65,7 +65,7 @@ function outcomeClass(code){return ({SUCCESS:"success",PARTIAL:"partial",BLOCKED
 function renderExecution(x){
   const outcome=x.outcome||{},code=outcome.code||"UNVERIFIED",retrieved=x.selected_tools||[],calls=x.tool_outputs||[],metrics=x.metrics||{},retrieval=x.retrieval||{},exposed=x.execution?.tools_exposed||retrieved.map(t=>t.key),called=x.execution?.tools_called||calls.map(c=>c.tool);
   $("#resultTitle").textContent=`${code} · ${outcome.verified_objectives??0}/${outcome.total_objectives??0} objectives verified`;
-  $("#resultMeta").textContent=`${x.execution_mode==="agent"?"Real Groq agent":"Deterministic fixture"} · ${x.method||"graph"} retrieval · ${x.task||""}`;
+  $("#resultMeta").textContent=`${x.execution_mode==="agent"?"Live agent":"Deterministic fixture"} · ${x.method||"graph"} retrieval · ${x.task||""}`;
   $("#outcomeBadge").textContent=code;$("#outcomeBadge").className=`outcome-badge ${outcomeClass(code)}`;
   $("#metricTools").textContent=`${retrieved.length} / ${called.length}`;
   $("#metricContext").textContent=`${retrieval.context_tokens_est??metrics.context_tokens_est??"—"} tok`;
@@ -95,41 +95,46 @@ $("#runTask").addEventListener("click",async()=>{
   finally{button.disabled=false}
 });
 
+function graphLayout(nodes,edges,width=1240,height=680){
+  const centers={Agent:[.18,.46],TaskType:[.30,.18],Skill:[.38,.40],Tool:[.51,.56],MCPServer:[.72,.34],Entity:[.77,.73]};
+  const degree=new Map(nodes.map(n=>[n.id,0]));edges.forEach(e=>{degree.set(e.from,(degree.get(e.from)||0)+1);degree.set(e.to,(degree.get(e.to)||0)+1)});
+  const buckets=new Map(),points=new Map();
+  nodes.forEach(n=>{const center=centers[n.type]||[.5,.5],bucket=buckets.get(n.type)||0;buckets.set(n.type,bucket+1);let hash=0;for(const ch of n.id)hash=(hash*31+ch.charCodeAt(0))>>>0;const angle=bucket*2.399963+hash%100/100,radius=nodes.length>18?35+Math.sqrt(bucket)*28:30+bucket*15;points.set(n.id,{x:center[0]*width+Math.cos(angle)*radius,y:center[1]*height+Math.sin(angle)*radius,cx:center[0]*width,cy:center[1]*height,r:10+Math.min(13,(degree.get(n.id)||0)*1.5),degree:degree.get(n.id)||0})});
+  for(let step=0;step<90;step++){
+    const force=new Map(nodes.map(n=>[n.id,{x:0,y:0}]));
+    for(let i=0;i<nodes.length;i++)for(let j=i+1;j<nodes.length;j++){const a=points.get(nodes[i].id),b=points.get(nodes[j].id),dx=a.x-b.x,dy=a.y-b.y,d=Math.max(1,Math.hypot(dx,dy)),minimum=a.r+b.r+31;if(d<minimum){const push=(minimum-d)*.09/d,fa=force.get(nodes[i].id),fb=force.get(nodes[j].id);fa.x+=dx*push;fa.y+=dy*push;fb.x-=dx*push;fb.y-=dy*push}}
+    edges.forEach(e=>{const a=points.get(e.from),b=points.get(e.to);if(!a||!b)return;const dx=b.x-a.x,dy=b.y-a.y,d=Math.max(1,Math.hypot(dx,dy)),pull=(d-115)*.0015,fa=force.get(e.from),fb=force.get(e.to);fa.x+=dx*pull;fa.y+=dy*pull;fb.x-=dx*pull;fb.y-=dy*pull});
+    nodes.forEach(n=>{const p=points.get(n.id),f=force.get(n.id);p.x=Math.max(36,Math.min(width-38,p.x+f.x+(p.cx-p.x)*.018));p.y=Math.max(36,Math.min(height-36,p.y+f.y+(p.cy-p.y)*.018))});
+  }
+  return points;
+}
 function graphNodeMarkup(node,pos,dim,selected,focused){
-  const color=nodeColors[node.type]||"#597066",x=pos.x,y=pos.y,w=node.type==="Tool"?176:node.type==="Entity"?150:node.type==="Skill"?148:145,h=54;
-  const label=node.label||node.id,display=label.length>24?label.slice(0,22)+"…":label;
-  const shape=node.type==="TaskType"?`<path class="node-shape" d="M ${x+10} ${y} H ${x+w-10} L ${x+w} ${y+h/2} L ${x+w-10} ${y+h} H ${x+10} L ${x} ${y+h/2} Z" fill="${color}22" stroke="${color}"/>`:
-    node.type==="Agent"?`<rect class="node-shape" x="${x}" y="${y}" width="${w}" height="${h}" rx="25" fill="${color}22" stroke="${color}"/>`:
-    node.type==="MCPServer"?`<path class="node-shape" d="M ${x+9} ${y} H ${x+w-9} L ${x+w} ${y+10} V ${y+h-10} L ${x+w-9} ${y+h} H ${x+9} L ${x} ${y+h-10} V ${y+10} Z" fill="${color}22" stroke="${color}"/>`:
-    `<rect class="node-shape" x="${x}" y="${y}" width="${w}" height="${h}" rx="${node.type==="Entity"?22:8}" fill="${color}22" stroke="${color}"/>`;
-  return `<g class="graph-node ${dim?"dim":""} ${selected?"selected":""} ${focused?"focused":""}" data-node="${esc(node.id)}" tabindex="0" role="button" aria-label="Inspect ${esc(node.type)} ${esc(label)}">${shape}<text class="node-type" x="${x+10}" y="${y+15}">${esc(node.type.toUpperCase())}</text><text class="node-label" x="${x+10}" y="${y+35}">${esc(display)}</text></g>`;
+  const color=nodeColors[node.type]||"#9bb88a",label=node.label||node.id,display=label.length>27?label.slice(0,25)+"…":label,r=pos.r;
+  return `<g class="graph-node ${dim?"dim":""} ${selected?"selected":""} ${focused?"focused":""}" data-node="${esc(node.id)}" tabindex="0" role="button" aria-label="Inspect ${esc(node.type)} ${esc(label)}"><title>${esc(label)} · ${esc(node.type)} · degree ${pos.degree}</title><circle class="node-halo" cx="${pos.x}" cy="${pos.y}" r="${r+5}" fill="${color}"/><circle class="node-shape" cx="${pos.x}" cy="${pos.y}" r="${r}" fill="${color}"/><text class="node-label" x="${pos.x+r+8}" y="${pos.y+4}">${esc(display)}</text></g>`;
 }
 function renderGraph(){
   if(!state.graph)return;const raw=state.graph,nodes=raw.nodes||[],edges=raw.edges||[],query=$("#graphSearch").value.trim().toLowerCase(),type=$("#nodeFilter").value,edgeType=$("#edgeFilter").value;
   const types=[...new Set(edges.map(e=>e.type))].sort();$("#edgeFilter").innerHTML='<option value="all">All relationships</option>'+types.map(t=>`<option value="${esc(t)}" ${edgeType===t?"selected":""}>${esc(t.replaceAll("_"," "))}</option>`).join("");
   const nodeMap=new Map(nodes.map(n=>[n.id,n]));
   const visibleNodes=nodes.filter(n=>(type==="all"||n.type===type)&&(!query||`${n.id} ${n.type} ${JSON.stringify(n.metadata||{})}`.toLowerCase().includes(query)));
-  const visibleIds=new Set(visibleNodes.map(n=>n.id));
-  const visibleEdges=edges.filter(e=>(edgeType==="all"||e.type===edgeType)&&visibleIds.has(e.from)&&visibleIds.has(e.to));
-  const columns={Agent:85,TaskType:95,Skill:300,Tool:555,MCPServer:840,Entity:1050};
-  const counts={},positions={};visibleNodes.forEach(n=>{const x=columns[n.type]??300,row=counts[n.type]||0;counts[n.type]=row+1;positions[n.id]={x,y:34+row*78,w:n.type==="Tool"?176:n.type==="Entity"?150:n.type==="Skill"?148:145,h:54}});
-  const maxY=Math.max(440,...Object.values(counts).map(c=>54+c*78));const width=1240;let svg=`<svg class="graph-svg" viewBox="0 0 ${width} ${maxY}" xmlns="http://www.w3.org/2000/svg" aria-label="HydraDB tool retrieval graph"><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3 z" fill="#74867e"/></marker></defs><g class="graph-world" transform="translate(${state.graphPan.x} ${state.graphPan.y}) scale(${state.graphScale})">`;
+  const visibleIds=new Set(visibleNodes.map(n=>n.id)),visibleEdges=edges.filter(e=>(edgeType==="all"||e.type===edgeType)&&visibleIds.has(e.from)&&visibleIds.has(e.to));
+  const width=1240,maxY=680,positions=graphLayout(visibleNodes,visibleEdges,width,maxY);let svg=`<svg class="graph-svg" viewBox="0 0 ${width} ${maxY}" xmlns="http://www.w3.org/2000/svg" aria-label="HydraDB retrieved relationship graph"><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3 z" fill="#b5c98a"/></marker></defs><g class="graph-world" transform="translate(${state.graphPan.x} ${state.graphPan.y}) scale(${state.graphScale})">`;
   const neighborhood=new Set();if(state.graphFocus){neighborhood.add(state.graphFocus);visibleEdges.forEach(e=>{if(e.from===state.graphFocus)neighborhood.add(e.to);if(e.to===state.graphFocus)neighborhood.add(e.from)})}
-  visibleEdges.forEach(e=>{const a=positions[e.from],b=positions[e.to];if(!a||!b)return;const x1=a.x+a.w,y1=a.y+27,x2=b.x,y2=b.y+27,mid=(x1+x2)/2,dim=state.graphFocus&&!neighborhood.has(e.from)&&!neighborhood.has(e.to);svg+=`<g class="graph-edge"><path class="edge-line ${esc(e.type)} ${dim?"dim":""}" d="M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}"/><text class="edge-label ${dim?"dim":""}" x="${mid}" y="${(y1+y2)/2-5}" text-anchor="middle">${esc(e.type)}</text></g>`});
-  visibleNodes.forEach(n=>{const p=positions[n.id],dim=!!(state.graphFocus&&!neighborhood.has(n.id));svg+=graphNodeMarkup(n,p,dim,n.id===state.selectedNode,n.id===state.graphFocus)});
-  svg+=`</g></svg>`;$("#graphCanvas").innerHTML=svg;$("#graphTitle").textContent=raw.skills?.map(s=>s.skill).join(" · ")||"Retrieved graph route";$("#graphStatus").textContent=`${visibleNodes.length} nodes · ${visibleEdges.length} relationships · ${raw.retrieval_ms??0} ms route`;
+  visibleEdges.forEach(e=>{const a=positions.get(e.from),b=positions.get(e.to);if(!a||!b)return;const dx=b.x-a.x,dy=b.y-a.y,d=Math.max(1,Math.hypot(dx,dy)),x1=a.x+dx/d*a.r,y1=a.y+dy/d*a.r,x2=b.x-dx/d*(b.r+7),y2=b.y-dy/d*(b.r+7),midX=(x1+x2)/2,midY=(y1+y2)/2,dim=state.graphFocus&&!neighborhood.has(e.from)&&!neighborhood.has(e.to),showLabel=state.graphFocus&&(e.from===state.graphFocus||e.to===state.graphFocus);svg+=`<g class="graph-edge"><title>${esc(e.from)} —${esc(e.type)}→ ${esc(e.to)}</title><path class="edge-line ${esc(e.type)} ${dim?"dim":""}" marker-end="url(#arrow)" d="M ${x1} ${y1} L ${x2} ${y2}"/>${showLabel?`<text class="edge-label" x="${midX}" y="${midY-5}" text-anchor="middle">${esc(e.type)}</text>`:""}</g>`});
+  visibleNodes.forEach(n=>{const p=positions.get(n.id),dim=!!(state.graphFocus&&!neighborhood.has(n.id));svg+=graphNodeMarkup(n,p,dim,n.id===state.selectedNode,n.id===state.graphFocus)});
+  svg+=`</g></svg>`;$("#graphCanvas").innerHTML=svg;$("#graphTitle").textContent=raw.skills?.map(s=>s.skill).join(" · ")||"Retrieved graph neighborhood";$("#graphStatus").textContent=`${visibleNodes.length} nodes · ${visibleEdges.length} relationships · ${raw.retrieval_ms??0} ms retrieval`;
   $("#graphLegend").innerHTML=[...new Set(nodes.map(n=>n.type))].map(t=>`<span class="legend-item"><i class="legend-dot ${esc(t)}" style="background:${nodeColors[t]||"#778"}"></i>${esc(t)}</span>`).join("");
   $$(".graph-node",$("#graphCanvas")).forEach(g=>{g.addEventListener("click",()=>selectGraphNode(g.dataset.node));g.addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();selectGraphNode(g.dataset.node)}})});
   $(".graph-svg",$("#graphCanvas")).addEventListener("wheel",e=>{e.preventDefault();state.graphScale=Math.max(.55,Math.min(1.8,state.graphScale+(e.deltaY<0?.08:-.08)));renderGraph()},{passive:false});
-  const world=$(".graph-world",$("#graphCanvas"));world.addEventListener("pointerdown",e=>{if(e.target.closest(".graph-node"))return;state.graphPointer={x:e.clientX,y:e.clientY,pan:{...state.graphPan}};world.setPointerCapture(e.pointerId)});world.addEventListener("pointermove",e=>{if(!state.graphPointer)return;const rect=$("#graphCanvas").getBoundingClientRect();state.graphPan={x:state.graphPointer.pan.x+(e.clientX-state.graphPointer.x)*1240/rect.width/state.graphScale,y:state.graphPointer.pan.y+(e.clientY-state.graphPointer.y)*maxY/rect.height/state.graphScale};world.setAttribute("transform",`translate(${state.graphPan.x} ${state.graphPan.y}) scale(${state.graphScale})`)});world.addEventListener("pointerup",()=>{state.graphPointer=null});
+  const world=$(".graph-world",$("#graphCanvas"));world.addEventListener("pointerdown",e=>{if(e.target.closest(".graph-node"))return;state.graphPointer={x:e.clientX,y:e.clientY,pan:{...state.graphPan}};world.setPointerCapture(e.pointerId)});world.addEventListener("pointermove",e=>{if(!state.graphPointer)return;const rect=$("#graphCanvas").getBoundingClientRect();state.graphPan={x:state.graphPointer.pan.x+(e.clientX-state.graphPointer.x)*1240/rect.width/state.graphScale,y:state.graphPointer.pan.y+(e.clientY-state.graphPointer.y)*680/rect.height/state.graphScale};world.setAttribute("transform",`translate(${state.graphPan.x} ${state.graphPan.y}) scale(${state.graphScale})`)});world.addEventListener("pointerup",()=>{state.graphPointer=null});
   if(state.selectedNode&&nodeMap.has(state.selectedNode))renderInspector(nodeMap.get(state.selectedNode),visibleEdges,nodeMap);
 }
+function selectGraphNode(id){state.selectedNode=id;state.graphFocus=id;const node=state.graph?.nodes?.find(n=>n.id===id);if(node)renderInspector(node,state.graph.edges||[],new Map(state.graph.nodes.map(n=>[n.id,n])));renderGraph()}
 function renderInspector(node,edges,nodeMap){
   $("#inspectorTitle").textContent=node.id;const m=node.metadata||{},related=edges.filter(e=>e.from===node.id||e.to===node.id);
   $("#inspectorBody").innerHTML=`<div class="inspect-type">${esc(node.type)}</div><h3 class="inspect-name">${esc(m.name||node.label||node.id)}</h3>${m.description?`<p class="inspect-description">${esc(m.description)}</p>`:""}<div class="inspect-section"><h4>Node identifier</h4><pre>${esc(node.id)}</pre></div>${node.type==="Tool"?`<div class="inspect-section"><h4>Logical server · provenance</h4><div class="inspect-links"><span>${esc(m.server||"unknown server")}</span><span>${esc(m.execution_provenance||"registered")}</span></div></div><div class="inspect-section"><h4>Input schema</h4><pre>${esc(typeof m.input_schema==="string"?m.input_schema:JSON.stringify(m.input_schema||{},null,2))}</pre></div><div class="inspect-section"><h4>Declared prerequisites</h4><div class="inspect-links">${(m.dependencies||[]).map(d=>`<span>${esc(d)}</span>`).join("")||"<span>none declared</span>"}</div></div>`:""}<div class="inspect-section"><h4>Connected relationships (${related.length})</h4><div class="inspect-links">${related.map(e=>`<span>${esc(e.from===node.id?`→ ${e.type} → ${e.to}`:`${e.from} → ${e.type} →`)}</span>`).join("")||"<span>No visible relationship</span>"}</div></div><div class="inspect-section"><button class="button secondary small-button" id="focusNeighbors">${state.graphFocus===node.id?"Clear neighborhood focus":"Focus immediate neighbors"}</button></div>`;
   $("#focusNeighbors").addEventListener("click",()=>{state.graphFocus=state.graphFocus===node.id?null:node.id;renderGraph()});
 }
-function selectGraphNode(id){state.selectedNode=id;const node=state.graph?.nodes?.find(n=>n.id===id);if(node)renderInspector(node,state.graph.edges||[],new Map(state.graph.nodes.map(n=>[n.id,n])));renderGraph()}
 async function loadGraph(){
   const task=$("#graphTask").value.trim()||"What is the status of this order?",order=$("#graphOrder").value;
   $("#graphCanvas").innerHTML='<div class="graph-loading">Reading the bounded graph route from HydraDB…</div>';$("#graphStatus").textContent="Querying HydraDB";

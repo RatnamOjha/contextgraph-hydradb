@@ -18,8 +18,8 @@ def relationship(src_kind: str, src: str, dst_kind: str, dst: str, **props: Any)
     return {"src": HydraClient.id_for(src_kind, src), "dst": HydraClient.id_for(dst_kind, dst), **props}
 
 
-async def seed_catalog(db: HydraClient, size: int = 20, reset: bool = True) -> dict[str, int]:
-    catalog = make_catalog(size)
+async def seed_catalog(db: HydraClient, size: int = 20, reset: bool = True, catalog_scope: str = "combined") -> dict[str, Any]:
+    catalog = make_catalog(size, scope=catalog_scope)
     if reset:
         for label in ("Execution", "LearningUpdate", "TaskType", "Agent", "Skill", "Tool", "MCPServer", "Entity", "Task"):
             await db.query(f"MATCH (n:{label}) DETACH DELETE n")
@@ -29,12 +29,16 @@ async def seed_catalog(db: HydraClient, size: int = 20, reset: bool = True) -> d
 
     agent = node("Agent", "support-agent", name="Support operations agent", description="Resolves customer context and investigates support requests.")
     grouped["Agent"].append(agent)
+    active_skills = {tool.skill for tool in catalog}
+    for fixture in TASKS.values(): active_skills.update(fixture["skills"])
     for key, (name, description) in SKILLS.items():
+        if key not in active_skills: continue
         grouped["Skill"].append(node("Skill", key, name=name, description=description))
         edges["HAS_SKILL"].append(relationship("Agent", "support-agent", "Skill", key, weight=1.0))
 
     for server_id, server_name in SERVERS.items():
-        grouped["MCPServer"].append(node("MCPServer", server_id, name=server_name, transport="stdio", protocol="MCP"))
+        if any(tool.server == server_id for tool in catalog):
+            grouped["MCPServer"].append(node("MCPServer", server_id, name=server_name, transport="stdio", protocol="MCP"))
 
     for tool in catalog:
         grouped["Tool"].append(node("Tool", tool.key, name=tool.name, description=tool.description, server=tool.server, skill=tool.skill, schema=tool.input_schema))
@@ -47,14 +51,6 @@ async def seed_catalog(db: HydraClient, size: int = 20, reset: bool = True) -> d
         for dep in tool.dependencies:
             edges["DEPENDS_ON"].append(relationship("Tool", tool.key, "Tool", dep, weight=1.0))
 
-    tool_keys = {tool.key for tool in catalog}
-    for scenario, fixture in TASKS.items():
-        # Workflow skills can span MCP servers: this records the cross-server
-        # tools required for the task as part of the selected skill context.
-        for key in fixture["required"]:
-            if key in tool_keys:
-                edges["USES"].append(relationship("Skill", fixture["skill"], "Tool", key))
-
     # Dedupe nodes and relationships before the bulk UNWIND writes.
     for label, rows in list(grouped.items()):
         unique = {row["id"]: row for row in rows}
@@ -65,10 +61,8 @@ async def seed_catalog(db: HydraClient, size: int = 20, reset: bool = True) -> d
 
     for scenario, fixture in TASKS.items():
         grouped["TaskType"].append(node("TaskType", scenario, name=fixture["title"], description=fixture["task"]))
-        for skill in SKILLS:
-            if skill == "catalog_utilities":
-                continue
-            edges["REQUIRES"].append(relationship("TaskType", scenario, "Skill", skill))
+        for skill in fixture["skills"]:
+            edges["REQUIRES"].append(relationship("TaskType", scenario, "Skill", skill, weight=1.0))
         ticket = f"ticket:{fixture['ticket']}"
         customer = f"customer:{fixture['customer']}"
         order = f"order:{fixture['order']}"
@@ -88,17 +82,17 @@ async def seed_catalog(db: HydraClient, size: int = 20, reset: bool = True) -> d
     for rel_type, rows in edges.items():
         await db.query(f"UNWIND $rows AS row CREATE (a {{id: row.src}})-[:{rel_type}]->(b {{id: row.dst}})", {"rows": rows})
 
-    for scenario in TASKS:
+    for scenario, fixture in TASKS.items():
         task_id = HydraClient.id_for("TaskType", scenario)
-        for skill in SKILLS:
+        for skill in fixture["skills"]:
             skill_id = HydraClient.id_for("Skill", skill)
             await db.query(f"MATCH (t:TaskType {{id: {task_id}}})-[r:REQUIRES]->(s:Skill {{id: {skill_id}}}) SET r.weight = 1.0")
 
-    data_graph = await seed_olist_entities(db, DEFAULT_DB) if available(DEFAULT_DB) else {"entities": 0, "entity_edges": 0}
+    data_graph = await seed_olist_entities(db, DEFAULT_DB) if catalog_scope == "combined" and available(DEFAULT_DB) else {"entities": 0, "entity_edges": 0}
 
     # Add an Agent -> Skill -> Tool -> MCP sample path as the model's front door.
     # Agent -> skill edges are already registered above.
-    return {"tools": len(catalog), "skills": len(SKILLS), "servers": len(SERVERS), "task_types": len(TASKS), "nodes": sum(map(len, grouped.values())) + data_graph["entities"], "relationship_types": len(edges), **data_graph}
+    return {"catalog_scope": catalog_scope, "tools": len(catalog), "skills": len(active_skills), "servers": len(grouped["MCPServer"]), "task_types": len(TASKS), "nodes": sum(map(len, grouped.values())) + data_graph["entities"], "relationship_types": len(edges), **data_graph}
 
 
 async def seed_olist_entities(db: HydraClient, path=DEFAULT_DB, limit: int = 1000) -> dict[str, int]:

@@ -9,6 +9,8 @@ HYDRA_HTTP_PORT="${HYDRA_HTTP_PORT:-18443}"
 HYDRA_BOLT_PORT="${HYDRA_BOLT_PORT:-17687}"
 HYDRA_ADMIN_PORT="${HYDRA_ADMIN_PORT:-19091}"
 CATALOG_SIZE="${CONTEXTGRAPH_CATALOG_SIZE:-100}"
+CATALOG_SCOPE="${CONTEXTGRAPH_CATALOG_SCOPE:-combined}"
+HYDRA_PROVIDER="${CONTEXTGRAPH_HYDRA_PROVIDER:-memory}"
 
 mkdir -p "$STATE_DIR/store" "$STATE_DIR/cache" "$STATE_DIR/logs"
 if [[ ! -f "$HYDRA_SOURCE/Cargo.toml" ]]; then
@@ -30,7 +32,12 @@ if [[ ! -x "$HYDRA_SOURCE/target/debug/graph-node" ]]; then
 fi
 
 printf '%s\n' "contextgraph-local-development-token-32-bytes" > "$STATE_DIR/auth-token"
-export CLOUD_PROVIDER=local LOCAL_PATH="$STATE_DIR/store"
+export CLOUD_PROVIDER="$HYDRA_PROVIDER"
+if [[ "$HYDRA_PROVIDER" == "local" ]]; then
+  export LOCAL_PATH="$STATE_DIR/store"
+else
+  unset LOCAL_PATH || true
+fi
 export GRAPH_NAMESPACE=contextgraph GRAPH_ID=default GRAPH_CELL_ID=cell-0 GRAPH_CELLS=cell-0 GRAPH_DATA_PATH=data
 export GRAPH_ALLOW_PLAINTEXT=true GRAPH_AUTH_TOKEN_FILE="$STATE_DIR/auth-token"
 export GRAPH_DATA_CACHE_BYTES=67108864 GRAPH_DATA_CACHE_DIR="$STATE_DIR/cache"
@@ -67,11 +74,16 @@ for _ in $(seq 1 60); do
   curl -fsS "http://127.0.0.1:$API_PORT/api/health" >/dev/null 2>&1 && break
   sleep .5
 done
-curl -fsS -X POST "http://127.0.0.1:$API_PORT/api/seed" -H 'Content-Type: application/json' -d "{\"catalog_size\":$CATALOG_SIZE,\"reset\":true}"
+curl -fsS -X POST "http://127.0.0.1:$API_PORT/api/seed" -H 'Content-Type: application/json' -d "{\"catalog_size\":$CATALOG_SIZE,\"catalog_scope\":\"$CATALOG_SCOPE\",\"reset\":true}"
 curl -fsS -X POST "http://127.0.0.1:$API_PORT/api/evaluate" -H 'Content-Type: application/json' -d '{"catalog_size":'"$CATALOG_SIZE"',"iterations":3}' > "$STATE_DIR/logs/initial-evaluation.json"
 echo
 echo "ContextGraph is ready at http://127.0.0.1:$API_PORT"
-echo "HydraDB data: $STATE_DIR/store"
+echo "HydraDB provider: $HYDRA_PROVIDER"
+if [[ "$HYDRA_PROVIDER" == "memory" ]]; then
+  echo "HydraDB graph is in memory and is reseeded when this script starts."
+else
+  echo "HydraDB data: $STATE_DIR/store"
+fi
 echo "Logs: $STATE_DIR/logs"
 echo "Press Ctrl-C to stop both processes."
 wait "$API_PID"

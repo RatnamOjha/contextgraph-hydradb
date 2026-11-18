@@ -20,7 +20,7 @@ HydraDB supplies the catalog and relationships. SQLite supplies historical order
 
 ## Pages
 
-- **Overview** explains the request path and links into the interactive workflow.
+- **Ask** is the first view. It frames the product around customer-support questions and shows a labeled routing schematic; the call to action opens the real interactive workflow.
 - **Playground** chooses an Olist order, task, retrieval strategy, and execution mode. Results include the evaluator outcome, objective rows, selected tools, actual calls, graph paths, and trace.
 - **Graph Explorer** calls `GET /api/graph/explore` for a bounded task-specific route and optional order neighborhood. It supports search, type/relationship filters, node inspection, immediate-neighbor focus, pan, zoom, and reset. The API caps output at 150 nodes, 300 relationships, and 30 order items. It does not execute tools.
 - **Learning Lab** calls the fixture endpoint only when requested. The Groq button is separate and only calls the real-agent endpoint. Both demonstrate request-scoped retrieval filtering, not a persisted shared-graph mutation.

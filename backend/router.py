@@ -74,8 +74,8 @@ def candidate_skills(text: str, limit: int = 3) -> list[dict[str, Any]]:
     return scores[:limit]
 
 
-def flat_candidates(task: str, candidates: list[dict[str, Any]], expand: bool = False) -> list[Tool]:
-    pool = [tool for tool in DATA_TOOLS if tool.skill in {row["skill"] for row in candidates}]
+def flat_candidates(task: str, candidates: list[dict[str, Any]], expand: bool = False, catalog: list[Tool] | None = None) -> list[Tool]:
+    pool = [tool for tool in (catalog if catalog is not None else DATA_TOOLS) if tool.skill in {row["skill"] for row in candidates}]
     return expanded_flat_retrieve(task, pool, limit=4) if expand else flat_retrieve(task, pool, limit=6)
 
 
@@ -156,20 +156,23 @@ async def route_graph(db: HydraClient, scenario: str, task_text: str = "") -> di
     t0 = time.perf_counter()
     _, ranks, _ = await db.query(
         f"MATCH (tt:TaskType {{id: {task_id}}})-[r:REQUIRES]->(s:Skill) "
-        "RETURN s.id AS id, s.key AS key, r.weight AS weight ORDER BY weight DESC, key ASC LIMIT 1"
+        "RETURN s.id AS id, s.key AS key, r.weight AS weight ORDER BY weight DESC, key ASC"
     )
     if not ranks:
         raise RuntimeError(f"No TaskType-to-Skill route is registered for {scenario}")
-    skill_id, skill, skill_weight = ranks[0]
+    skill_ids = [int(row[0]) for row in ranks]
+    skills = [row[1] for row in ranks]
+    skill, skill_weight = ranks[0][1], ranks[0][2]
+    skill_id_list = ", ".join(map(str, skill_ids))
     _, roots, root_latency = await db.query(
-        f"MATCH (tt:TaskType {{id: {task_id}}})-[:REQUIRES]->(s:Skill {{id: {int(skill_id)}}})-[:USES]->(t:Tool) "
+        f"MATCH (tt:TaskType {{id: {task_id}}})-[:REQUIRES]->(s:Skill)-[:USES]->(t:Tool) WHERE s.id IN [{skill_id_list}] "
         "OPTIONAL MATCH (t)-[:PROVIDED_BY]->(m:MCPServer) "
         "RETURN DISTINCT s.key AS skill, t.id AS id, t.key AS key, t.name AS name, t.description AS description, t.server AS server, t.schema AS schema, m.key AS mcp "
         "ORDER BY key"
     )
     selected: dict[int, dict[str, Any]] = {}
     root_ids: set[int] = set()
-    edges: list[dict[str, str]] = [{"from": scenario, "to": skill, "type": "REQUIRES"}]
+    edges: list[dict[str, str]] = [{"from": scenario, "to": key, "type": "REQUIRES"} for key in skills]
     for row in roots:
         skill_key, ident, key, name, description, server, schema, mcp = row
         ident = int(ident); root_ids.add(ident)
@@ -247,7 +250,7 @@ async def route_graph(db: HydraClient, scenario: str, task_text: str = "") -> di
         ])
         selected = {ident: tool for ident, tool in selected.items() if tool["key"] not in {"customer.resolve", "orders.list"}}
     traversal_ms += entity_ms
-    return {"skill": skill, "skill_weight": skill_weight, "tools": list(selected.values()), "edges": edges, "resolved_entities": resolved, "retrieval_ms": traversal_ms}
+    return {"skill": skill, "skills": skills, "skill_weight": skill_weight, "tools": list(selected.values()), "edges": edges, "resolved_entities": resolved, "retrieval_ms": traversal_ms}
 
 
 def execute_fixture(scenario: str, method: str, tool_keys: set[str], resolved: list[dict[str, str]]) -> dict[str, Any]:

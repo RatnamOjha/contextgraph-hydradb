@@ -85,6 +85,7 @@ def _local_learning_experiments() -> list[dict]:
 class SeedRequest(BaseModel):
     catalog_size: Literal[20, 100, 500] = 20
     reset: bool = True
+    catalog_scope: Literal["combined", "company"] = "combined"
 
 
 class RunRequest(BaseModel):
@@ -92,6 +93,7 @@ class RunRequest(BaseModel):
     method: Literal["full", "flat", "graph", "ablation", "expanded_flat"] = "graph"
     catalog_size: Literal[20, 100, 500] = 20
     execution_mode: Literal["fixture", "agent"] = "fixture"
+    catalog_scope: Literal["combined", "company"] = "combined"
 
 
 class EvalRequest(BaseModel):
@@ -181,7 +183,7 @@ async def orders(limit: int = 50):
 @app.post("/api/seed")
 async def seed(request: SeedRequest):
     try:
-        result = await seed_catalog(db, request.catalog_size, reset=request.reset)
+        result = await seed_catalog(db, request.catalog_size, reset=request.reset, catalog_scope=request.catalog_scope)
         log.info("catalog_seeded %s", result)
         return {"status": "seeded", "catalog_size": request.catalog_size, **result}
     except Exception as exc:
@@ -510,7 +512,7 @@ async def run_task(request: RunRequest):
     started = time.perf_counter()
     scenario = classify(request.task)
     fixture = TASKS[scenario]
-    catalog = make_catalog(request.catalog_size)
+    catalog = make_catalog(request.catalog_size, scope=request.catalog_scope)
     retrieval_ms = 0.0
     resolved: list[dict] = []
     paths: list[dict[str, str]] = []
