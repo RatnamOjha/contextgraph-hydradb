@@ -62,6 +62,19 @@ print(context.selection_reasons)
 
 Custom catalogs use a deterministic lexical rank over tool IDs, names, and descriptions, weighted by how common a term is in that catalog. This is not embedding search. Explicit `DEPENDS_ON` prerequisites are expanded with cycle and size bounds; a missing, excluded, or over-limit prerequisite appears in `missing_dependencies`. Additional candidates omitted by `max_tools` appear in `omitted_tool_ids`; either condition sets `complete=False`. `known_tool_ids` and `exclude_tool_ids` must exactly match IDs in the selected catalog. Known IDs appear as graph context and are omitted from the returned tool definitions; they satisfy a prerequisite only after exact catalog membership validation. Arbitrary values do not satisfy prerequisites. The bounded graph response contains actual stored catalog, server, and dependency relationships. The Olist path remains available with `retrieve(task, order_id=...)` and uses the legacy endpoint.
 
+## Evaluate retrieval labels
+
+`evaluate()` compares graph retrieval with a deterministic flat lexical baseline over the exact same catalog metadata. Each task supplies its required tool IDs. The report measures required-tool recall, retrieved tool count, prerequisite completeness, unrelated tool exposure, estimated schema-token context, and retrieval latency. It does not run tools or an LLM, and it does not measure task completion, model accuracy, billed tokens, or token savings.
+
+```python
+report = graph.evaluate("company", [
+    {"task": "Check refund eligibility for order 123",
+     "required_tools": ["company.commerce.check_refund"]},
+], max_tools=8)
+print(report.graph_average_required_tool_recall)
+print(report.flat_average_estimated_schema_tokens)
+```
+
 `inspect_tool()` currently lists the catalog and selects the matching tool because the service has no dedicated inspection endpoint. Network retries are bounded and apply only to idempotent GET requests. The client does not follow redirects.
 
 ## Local development

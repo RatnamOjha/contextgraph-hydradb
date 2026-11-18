@@ -9,6 +9,7 @@ from urllib.parse import quote
 import httpx
 
 from .exceptions import ContextGraphError
+from .evaluation import evaluate_results, validate_task_specs
 from .mcp_ingestion import discover_stdio_tools, ingestion_report
 from .models import (
     HealthResponse,
@@ -43,6 +44,7 @@ def _normalize_tool(row: dict[str, Any]) -> ToolDefinition:
         dependencies=row.get("dependencies") or [],
         provenance=row.get("provenance") or row.get("source") or row.get("execution_provenance"),
         execution_status=row.get("execution_status"),
+        catalog=row.get("catalog"),
     )
 
 
@@ -198,6 +200,21 @@ class ContextGraph:
         return _explanation(self.retrieve(task, order_id=order_id, catalog=catalog, max_tools=max_tools,
             known_tool_ids=known_tool_ids, exclude_tool_ids=exclude_tool_ids))
 
+    def evaluate(self, catalog: str, tasks: list[dict[str, Any]], *, max_tools: int = 8):
+        """Compare graph retrieval with a local flat lexical baseline on labeled tasks."""
+        specs = validate_task_specs(tasks)
+        if not 1 <= max_tools <= 50:
+            raise ValueError("max_tools must be between 1 and 50")
+        tools = [tool for tool in self.list_tools() if tool.catalog == catalog]
+        if not tools:
+            raise ValueError(f"No tools found in catalog {catalog!r}")
+        for spec in specs:
+            unknown = set(spec["required_tools"]) - {tool.id for tool in tools}
+            if unknown:
+                raise ValueError(f"required tools are not in catalog {catalog!r}: {', '.join(sorted(unknown))}")
+        graph_results = [self.retrieve(spec["task"], catalog=catalog, max_tools=max_tools) for spec in specs]
+        return evaluate_results(catalog, specs, tools, graph_results, max_tools)
+
 
 class AsyncContextGraph:
     """Asynchronous client with the same response models as :class:`ContextGraph`."""
@@ -267,3 +284,18 @@ class AsyncContextGraph:
                       exclude_tool_ids: list[str] | None = None) -> RetrievalExplanation:
         return _explanation(await self.retrieve(task, order_id=order_id, catalog=catalog, max_tools=max_tools,
             known_tool_ids=known_tool_ids, exclude_tool_ids=exclude_tool_ids))
+
+    async def evaluate(self, catalog: str, tasks: list[dict[str, Any]], *, max_tools: int = 8):
+        """Async comparison of graph retrieval and a flat lexical baseline."""
+        specs = validate_task_specs(tasks)
+        if not 1 <= max_tools <= 50:
+            raise ValueError("max_tools must be between 1 and 50")
+        tools = [tool for tool in await self.list_tools() if tool.catalog == catalog]
+        if not tools:
+            raise ValueError(f"No tools found in catalog {catalog!r}")
+        for spec in specs:
+            unknown = set(spec["required_tools"]) - {tool.id for tool in tools}
+            if unknown:
+                raise ValueError(f"required tools are not in catalog {catalog!r}: {', '.join(sorted(unknown))}")
+        graph_results = [await self.retrieve(spec["task"], catalog=catalog, max_tools=max_tools) for spec in specs]
+        return evaluate_results(catalog, specs, tools, graph_results, max_tools)

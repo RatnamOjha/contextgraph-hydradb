@@ -41,6 +41,8 @@ Phase 4 adds `POST /api/v1/catalogs/{catalog}/retrieve` and SDK `retrieve(task, 
 
 Phase 6 refactors `packages/contextgraph-mcp` to use `AsyncContextGraph` for tool listing, inspection, Olist retrieval, and catalog retrieval. It keeps the existing MCP tool names and return fields while adding optional catalog controls. A disposable HydraDB integration test compares SDK and MCP retrieval outputs for the same task and catalog.
 
+Phase 7 adds SDK `evaluate(catalog, tasks, max_tools=...)`. It compares graph retrieval with a flat lexical top-k baseline over the same tool definitions and caller-supplied required-tool labels. Reported values are retrieval recall, returned tool count, dependency completeness, unrelated tool exposure, character-based schema-token estimates, and retrieval latency. These are not tool execution outcomes, LLM accuracy, actual tokenization, or billed token savings.
+
 At the Phase 0 audit, no endpoint registered tools or refreshed a catalog. There is still no `GET /api/tools/{id}` endpoint. The MCP adapter now calls the same typed SDK client as Python applications; SDK `inspect_tool()` still lists the catalog because the API has no single-tool endpoint.
 
 ## 2. HydraDB graph model and write boundaries

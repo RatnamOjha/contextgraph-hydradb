@@ -34,6 +34,12 @@ The adapter example returns schema dictionaries for the developer's existing age
 .venv/bin/python examples/agent_adapter.py
 ```
 
+After running the basic example at least once, run the labeled retrieval comparison:
+
+```bash
+.venv/bin/python examples/evaluate_catalog.py
+```
+
 The SDK distribution is not published to PyPI. `scripts/sdk-dev.sh` installs the checkout into `.venv` for local use. The backend requires a locally built HydraDB binary; first-time compilation needs Rust and the platform build prerequisites documented in [local development](DEPLOYMENT.md).
 
 ## Security and current scope

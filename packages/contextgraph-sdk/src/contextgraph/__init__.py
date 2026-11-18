@@ -3,6 +3,9 @@ from .client import AsyncContextGraph, ContextGraph
 from .exceptions import ContextGraphError
 from .models import (
     ContextGraphErrorInfo,
+    EvaluationReport,
+    EvaluationStrategyResult,
+    EvaluationTaskResult,
     HealthResponse,
     MCPIngestionReport,
     RetrievalExplanation,
@@ -14,6 +17,7 @@ from .models import (
 
 __all__ = [
     "AsyncContextGraph", "ContextGraph", "ContextGraphError", "ContextGraphErrorInfo",
+    "EvaluationReport", "EvaluationStrategyResult", "EvaluationTaskResult",
     "HealthResponse", "MCPIngestionReport", "RetrievalExplanation", "RetrievalMetadata", "RetrievalResult",
     "ToolDefinition", "ToolDependency",
 ]

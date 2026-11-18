@@ -25,6 +25,7 @@ class ToolDefinition(BaseModel):
     dependencies: list[str] = Field(default_factory=list)
     provenance: str | None = None
     execution_status: str | None = None
+    catalog: str | None = None
 
     @field_validator("dependencies", mode="before")
     @classmethod
@@ -88,6 +89,42 @@ class MCPIngestionReport(BaseModel):
     registered_tool_ids: list[str] = Field(default_factory=list)
     catalog_version: str | None = None
     fingerprint: str | None = None
+
+
+class EvaluationStrategyResult(BaseModel):
+    selected_tool_ids: list[str]
+    required_tool_recall: float
+    retrieved_tool_count: int
+    dependency_complete: bool
+    unrelated_tool_count: int
+    estimated_schema_tokens: int
+    retrieval_ms: float
+
+
+class EvaluationTaskResult(BaseModel):
+    task: str
+    required_tool_ids: list[str]
+    graph: EvaluationStrategyResult
+    flat: EvaluationStrategyResult
+
+
+class EvaluationReport(BaseModel):
+    catalog: str
+    tasks: list[EvaluationTaskResult]
+    graph_average_required_tool_recall: float
+    flat_average_required_tool_recall: float
+    graph_average_retrieved_tools: float
+    flat_average_retrieved_tools: float
+    graph_dependency_complete_rate: float
+    flat_dependency_complete_rate: float
+    graph_average_unrelated_tools: float
+    flat_average_unrelated_tools: float
+    graph_average_estimated_schema_tokens: float
+    flat_average_estimated_schema_tokens: float
+    measurement_note: str = (
+        "Retrieval-only measurements on the supplied catalog and labels. Schema token counts are estimates; "
+        "this report does not measure LLM accuracy, tool execution, or billed token savings."
+    )
 
 
 class ContextGraphErrorInfo(BaseModel):

@@ -85,6 +85,12 @@ def test_new_mcp_catalog_retrieves_only_task_context_and_expands_prerequisites()
                             catalog="ops", max_tools=4)
                         control = graph.retrieve("Find a compatible replacement part",
                             catalog="ops", max_tools=2)
+                        evaluation = graph.evaluate("ops", [
+                            {"task": "Determine refund eligibility for this order",
+                             "required_tools": ["ops.factory.check_refund"]},
+                            {"task": "Find a compatible replacement part",
+                             "required_tools": ["ops.factory.list_replacement_parts"]},
+                        ], max_tools=4)
                     refund_ids = {tool.id for tool in refund.tools}
                     control_ids = {tool.id for tool in control.tools}
                     assert report.discovered_tool_count == 5
@@ -94,6 +100,8 @@ def test_new_mcp_catalog_retrieves_only_task_context_and_expands_prerequisites()
                     assert refund.complete is True
                     assert control_ids == {"ops.factory.list_replacement_parts"}
                     assert refund.execution_performed is False
+                    assert evaluation.graph_average_required_tool_recall == 1.0
+                    assert "does not measure LLM accuracy" in evaluation.measurement_note
                     sdk_dependencies = {(dep.source_tool_id, dep.required_tool_id) for dep in refund.dependencies}
 
                     async def call_mcp_adapter():
