@@ -88,3 +88,27 @@ def test_registration_route_is_disabled_without_explicit_local_opt_in(monkeypatc
     monkeypatch.setenv("RENDER", "true")
     assert _local_catalog_registration_allowed(Request(scope)) is False
 
+
+def test_registration_route_rejects_unauthorized_write_without_touching_hydradb(monkeypatch):
+    from starlette.requests import Request
+    from fastapi import HTTPException
+    import backend.app as app_module
+
+    class MustNotWrite:
+        async def query(self, *args, **kwargs):
+            raise AssertionError("unauthorized registration reached HydraDB")
+
+    monkeypatch.delenv("CONTEXTGRAPH_ENV", raising=False)
+    monkeypatch.delenv("CONTEXTGRAPH_ENABLE_LOCAL_REGISTRATION", raising=False)
+    monkeypatch.delenv("RENDER", raising=False)
+    monkeypatch.delenv("RENDER_SERVICE_ID", raising=False)
+    monkeypatch.setattr(app_module, "db", MustNotWrite())
+    scope = {"type": "http", "method": "POST", "path": "/", "headers": [],
+             "client": ("198.51.100.10", 1000), "server": ("example.test", 8000), "scheme": "http"}
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(app_module.register_tools(
+            "commerce", Request(scope), app_module.RegisterToolsRequest(tools=[{"name": "get_order"}])
+        ))
+    assert error.value.status_code == 403
+
