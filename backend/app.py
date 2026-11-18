@@ -218,11 +218,22 @@ async def tools():
     try:
         rows = await inspect_tools(db)
         executable = {tool.key: tool for tool in DATA_TOOLS}
+        _, edge_rows, _ = await db.query("MATCH (a:Tool)-[:DEPENDS_ON]->(b:Tool) RETURN a.key AS source,b.key AS target LIMIT 10000")
+        dependency_map: dict[str, list[str]] = {}
+        for source, target in edge_rows:
+            dependency_map.setdefault(str(source), []).append(str(target))
         for row in rows:
             tool = executable.get(row["key"])
-            row["execution_status"] = ("simulated_policy" if tool.server == "contextgraph-simulated" else "dataset_backed") if tool else "legacy_fixture_only"
-            row["source"] = "ContextGraph demo policy" if tool and tool.server == "contextgraph-simulated" else "Olist historical dataset" if tool else "Synthetic legacy fixture; excluded from Groq agent tools"
-            row["dependencies"] = list(tool.dependencies) if tool else []
+            if tool:
+                row["execution_status"] = "simulated_policy" if tool.server == "contextgraph-simulated" else "dataset_backed"
+                row["source"] = "ContextGraph demo policy" if tool.server == "contextgraph-simulated" else "Olist historical dataset"
+            elif row.get("provenance") == "developer_registered":
+                row["execution_status"] = "metadata_only"
+                row["source"] = "Developer registered catalog metadata"
+            else:
+                row["execution_status"] = "legacy_fixture_only"
+                row["source"] = "Synthetic legacy fixture; excluded from Groq agent tools"
+            row["dependencies"] = sorted(set(dependency_map.get(row["key"], [])))
         return {"tools": rows}
     except Exception as exc:
         raise as_http_error(exc) from exc

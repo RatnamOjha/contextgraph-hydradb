@@ -39,7 +39,9 @@ Phase 2 adds `POST /api/v1/catalogs/{catalog}/tools` and SDK `register_tools(cat
 
 Phase 4 adds `POST /api/v1/catalogs/{catalog}/retrieve` and SDK `retrieve(task, catalog=..., max_tools=...)`. It uses bounded HydraDB reads scoped to one catalog, exact lexical metadata overlap with catalog rarity weights, and client-side cycle-safe prerequisite expansion. It does not execute tools, call an LLM, use embeddings, or claim that arbitrary values satisfy prerequisites. A missing or excluded prerequisite marks the response incomplete. `known_tool_ids` are accepted only after exact catalog membership validation. The legacy Olist retrieval remains on `/api/graph/explore`.
 
-At the Phase 0 audit, no endpoint registered tools or refreshed a catalog. There is still no `GET /api/tools/{id}` endpoint. The MCP adapter obtains existing catalog data from `/api/graph/explore` and `/api/tools`, then formats a read-only response itself.
+Phase 6 refactors `packages/contextgraph-mcp` to use `AsyncContextGraph` for tool listing, inspection, Olist retrieval, and catalog retrieval. It keeps the existing MCP tool names and return fields while adding optional catalog controls. A disposable HydraDB integration test compares SDK and MCP retrieval outputs for the same task and catalog.
+
+At the Phase 0 audit, no endpoint registered tools or refreshed a catalog. There is still no `GET /api/tools/{id}` endpoint. The MCP adapter now calls the same typed SDK client as Python applications; SDK `inspect_tool()` still lists the catalog because the API has no single-tool endpoint.
 
 ## 2. HydraDB graph model and write boundaries
 
@@ -148,7 +150,7 @@ The root `requirements.txt` installs FastAPI, Uvicorn, httpx, and Pydantic. Ther
 
 ## 6. Security boundaries
 
-- The current FastAPI API does not enforce authentication. The current MCP adapter makes unauthenticated GET requests and has no API-key option.
+- The current FastAPI API does not enforce authentication. The SDK and MCP adapter send unauthenticated requests by default; `api_key` is only a header pass-through for a separately configured gateway.
 - An SDK `api_key` argument must not be advertised as access control until a backend middleware actually validates it. It may be reserved or rejected/documented as unused until then.
 - The Render demo is public and must not receive developer-private tool metadata. Keep catalog writes disabled there.
 - A workspace/catalog identifier scopes queries but does not provide secure multitenancy by itself. Authorization must bind authenticated principals to allowed catalogs before public writes are enabled.

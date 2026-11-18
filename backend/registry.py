@@ -136,5 +136,5 @@ async def seed_olist_entities(db: HydraClient, path=DEFAULT_DB, limit: int = 100
 
 
 async def inspect_tools(db: HydraClient) -> list[dict[str, Any]]:
-    _, rows, _ = await db.query("MATCH (t:Tool) RETURN t.key AS key, t.name AS name, t.description AS description, t.server AS server, t.schema AS schema ORDER BY t.key")
-    return [dict(zip(["key", "name", "description", "server", "schema"], row)) for row in rows]
+    _, rows, _ = await db.query("MATCH (t:Tool) RETURN t.key AS key, t.name AS name, t.description AS description, t.server AS server, t.schema AS schema, t.provenance AS provenance, t.catalog AS catalog, t.output_schema AS output_schema ORDER BY t.key")
+    return [dict(zip(["key", "name", "description", "server", "schema", "provenance", "catalog", "output_schema"], row)) for row in rows]

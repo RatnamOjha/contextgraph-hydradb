@@ -1,5 +1,6 @@
 """End-to-end registration/retrieval against a disposable local HydraDB graph."""
 import json
+import asyncio
 import os
 import secrets
 import socket
@@ -11,6 +12,8 @@ import urllib.request
 from pathlib import Path
 
 import pytest
+from mcp import Client
+from mcp.client.stdio import StdioServerParameters
 
 from contextgraph import ContextGraph
 from scripts.graph_learning_experiment import NODE, HYDRA_SOURCE, isolated_env, wait_ready
@@ -91,6 +94,25 @@ def test_new_mcp_catalog_retrieves_only_task_context_and_expands_prerequisites()
                     assert refund.complete is True
                     assert control_ids == {"ops.factory.list_replacement_parts"}
                     assert refund.execution_performed is False
+                    sdk_dependencies = {(dep.source_tool_id, dep.required_tool_id) for dep in refund.dependencies}
+
+                    async def call_mcp_adapter():
+                        params = StdioServerParameters(command=sys.executable,
+                            args=["-m", "contextgraph_mcp.server"],
+                            env={"CONTEXTGRAPH_API_URL": f"http://127.0.0.1:{api_port}"})
+                        async with Client(params) as mcp_client:
+                            routed = await mcp_client.call_tool("retrieve_context", {
+                                "task": "Determine refund eligibility for this order", "catalog": "ops", "max_tools": 4})
+                            inspected = await mcp_client.call_tool("inspect_tool", {"tool_id": "ops.factory.check_refund"})
+                            return routed.structured_content, inspected.structured_content
+
+                    mcp_result, inspected = asyncio.run(call_mcp_adapter())
+                    mcp_ids = {tool["id"] for tool in mcp_result["selected_tools"]}
+                    mcp_dependencies = {(edge["from"], edge["to"]) for edge in mcp_result["required_dependencies"]}
+                    assert mcp_ids == refund_ids
+                    assert mcp_dependencies == sdk_dependencies
+                    assert mcp_result["execution_performed"] is False
+                    assert inspected["prerequisites"] == ["ops.factory.get_order"]
             finally:
                 if api is not None and api.poll() is None:
                     api.terminate()

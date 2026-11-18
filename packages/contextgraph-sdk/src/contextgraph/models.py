@@ -48,6 +48,8 @@ class RetrievalMetadata(BaseModel):
     bounded: dict[str, Any] = Field(default_factory=dict)
     endpoint: str
     catalog: str | None = None
+    graph_nodes: list[dict[str, Any]] = Field(default_factory=list)
+    graph_edges: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class RetrievalResult(BaseModel):

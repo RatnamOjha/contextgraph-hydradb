@@ -104,7 +104,9 @@ def _normalize_retrieval(payload: dict[str, Any], task: str, order_id: str | Non
         known_tool_ids=sorted(known),
         retrieval_ms=payload.get("retrieval_ms"), source=source,
         metadata=RetrievalMetadata(skills=skills, resolved_entities=resolved,
-            bounded=payload.get("bounded") or {}, endpoint=endpoint, catalog=payload.get("catalog")),
+            bounded=payload.get("bounded") or {}, endpoint=endpoint, catalog=payload.get("catalog"),
+            graph_nodes=[node for node in nodes if isinstance(node, dict)],
+            graph_edges=[edge for edge in edges if isinstance(edge, dict)]),
         complete=bool(payload.get("complete", not missing)),
     )
 
