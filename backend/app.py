@@ -24,6 +24,7 @@ from .fixtures import DATA_TOOLS, EVALUATION_CASES, SKILLS, TASKS, TRAINING_TASK
 from .hydra import HydraClient, HydraError
 from .registry import inspect_tools, seed_catalog, seed_olist_entities
 from .developer_catalog import register_catalog_tools
+from .catalog_retrieval import retrieve_catalog_context
 from .router import candidate_skills, classify, execute_fixture, expanded_flat_retrieve, flat_candidates, flat_retrieve, route_graph, route_graph_candidates, tool_json
 from .olist_store import DEFAULT_DB, available as olist_available, dataset_status, list_orders, lookup_order
 from .dataset_workflow import execute_deterministic, extract_order_id, required_tools
@@ -101,6 +102,13 @@ class RegisterToolDefinition(BaseModel):
 
 class RegisterToolsRequest(BaseModel):
     tools: list[RegisterToolDefinition] = Field(min_length=1, max_length=200)
+
+
+class CatalogRetrievalRequest(BaseModel):
+    task: str = Field(min_length=8, max_length=1200)
+    max_tools: int = Field(default=8, ge=1, le=50)
+    known_tool_ids: list[str] = Field(default_factory=list, max_length=50)
+    exclude_tool_ids: list[str] = Field(default_factory=list, max_length=50)
 
 
 class RunRequest(BaseModel):
@@ -237,6 +245,47 @@ async def register_tools(catalog: str, request: Request, body: RegisterToolsRequ
     try:
         async with _catalog_registration_lock:
             return await register_catalog_tools(db, catalog, [tool.model_dump() for tool in body.tools])
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise as_http_error(exc) from exc
+
+
+@app.post("/api/v1/catalogs/{catalog}/retrieve")
+async def retrieve_developer_catalog(catalog: str, body: CatalogRetrievalRequest):
+    """Return bounded graph context for one explicitly selected developer catalog."""
+    try:
+        _, tool_rows, _ = await db.query(
+            "MATCH (t:Tool {catalog: $catalog}) RETURN t.key AS key,t.catalog AS catalog,t.name AS name,"
+            "t.description AS description,t.schema AS schema,t.input_schema AS input_schema,"
+            "t.output_schema AS output_schema,t.server AS server,t.provenance AS provenance ORDER BY t.key LIMIT 201",
+            {"catalog": catalog})
+        if len(tool_rows) > 200:
+            raise HTTPException(status_code=422, detail="Catalog exceeds the 200-tool retrieval bound")
+        tools = [dict(zip(["key", "catalog", "name", "description", "schema", "input_schema",
+            "output_schema", "server", "provenance"], row)) for row in tool_rows]
+        if not tools:
+            raise HTTPException(status_code=404, detail=f"No registered tools found for catalog {catalog!r}")
+        _, catalog_rows, _ = await db.query("MATCH (c:Catalog {key: $catalog}) RETURN c.key AS key LIMIT 1", {"catalog": catalog})
+        if not catalog_rows:
+            raise HTTPException(status_code=404, detail=f"No registered catalog found for {catalog!r}")
+        _, edge_rows, _ = await db.query(
+            "MATCH (a:Tool {catalog: $catalog})-[:DEPENDS_ON]->(b:Tool) RETURN a.key AS source,b.key AS target LIMIT 1000",
+            {"catalog": catalog})
+        dependencies = [(str(source), str(target)) for source, target in edge_rows]
+        _, server_rows, _ = await db.query(
+            "MATCH (t:Tool {catalog: $catalog})-[:PROVIDED_BY]->(s:MCPServer) RETURN t.key AS tool,s.key AS server LIMIT 200",
+            {"catalog": catalog})
+        servers = [(str(tool), str(server)) for tool, server in server_rows]
+        _, catalog_edge_rows, _ = await db.query(
+            "MATCH (t:Tool {catalog: $catalog})-[:IN_CATALOG]->(c:Catalog) RETURN t.key AS tool,c.key AS catalog LIMIT 200",
+            {"catalog": catalog})
+        catalog_edges = [(str(tool), str(key)) for tool, key in catalog_edge_rows]
+        return retrieve_catalog_context(catalog=catalog, task=body.task, tools=tools,
+            dependencies=dependencies, servers=servers, catalog_edges=catalog_edges, max_tools=body.max_tools,
+            known_tool_ids=body.known_tool_ids, exclude_tool_ids=body.exclude_tool_ids)
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:

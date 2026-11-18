@@ -47,6 +47,7 @@ class RetrievalMetadata(BaseModel):
     resolved_entities: list[dict[str, Any]] = Field(default_factory=list)
     bounded: dict[str, Any] = Field(default_factory=dict)
     endpoint: str
+    catalog: str | None = None
 
 
 class RetrievalResult(BaseModel):
@@ -55,6 +56,9 @@ class RetrievalResult(BaseModel):
     dependencies: list[ToolDependency]
     selection_reasons: dict[str, list[str]]
     missing_dependencies: list[str] = Field(default_factory=list)
+    omitted_tool_ids: list[str] = Field(default_factory=list)
+    known_tool_ids: list[str] = Field(default_factory=list)
+    complete: bool = True
     retrieval_ms: float | None = None
     source: str
     execution_performed: Literal[False] = False
@@ -67,6 +71,9 @@ class RetrievalExplanation(BaseModel):
     selection_reasons: dict[str, list[str]]
     dependencies: list[ToolDependency]
     missing_dependencies: list[str]
+    omitted_tool_ids: list[str] = Field(default_factory=list)
+    known_tool_ids: list[str] = Field(default_factory=list)
+    complete: bool = True
     source: str
     retrieval_ms: float | None = None
     execution_performed: Literal[False] = False

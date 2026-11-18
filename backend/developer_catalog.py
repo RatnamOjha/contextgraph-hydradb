@@ -32,7 +32,8 @@ async def _ensure_edge(db: HydraClient, source_id: int, relation: str, target_id
             {"rows": [{"source": source_id, "target": target_id}]})
 
 
-def validate_catalog_registration(catalog: str, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def validate_catalog_registration(catalog: str, tools: list[dict[str, Any]],
+                                  existing_tool_names: set[str] | None = None) -> list[dict[str, Any]]:
     if not _IDENTIFIER.fullmatch(catalog):
         raise ValueError("catalog must be 1–80 letters, digits, dots, underscores, or hyphens")
     if not tools or len(tools) > 200:
@@ -72,7 +73,7 @@ def validate_catalog_registration(catalog: str, tools: list[dict[str, Any]]) -> 
             "output_schema": output_schema, "server": server, "prerequisites": prerequisites})
     # Do not create dangling dependency edges: every prerequisite must exist in
     # this registration batch or already be present in this same catalog.
-    names = {tool["name"] for tool in normalized}
+    names = {tool["name"] for tool in normalized} | (existing_tool_names or set())
     for tool in normalized:
         unresolved = [dep for dep in tool["prerequisites"] if dep not in names]
         if unresolved:
@@ -81,7 +82,10 @@ def validate_catalog_registration(catalog: str, tools: list[dict[str, Any]]) -> 
 
 
 async def register_catalog_tools(db: HydraClient, catalog: str, raw_tools: list[dict[str, Any]]) -> dict[str, Any]:
-    tools = validate_catalog_registration(catalog, raw_tools)
+    _, existing_rows, _ = await db.query("MATCH (t:Tool) RETURN t.key AS key,t.catalog AS catalog")
+    existing_names = {str(key)[len(catalog) + 1:] for key, scope in existing_rows
+        if scope == catalog and str(key).startswith(catalog + ".")}
+    tools = validate_catalog_registration(catalog, raw_tools, existing_names)
     fingerprint = catalog_fingerprint(tools)
     version = fingerprint[:16]
     catalog_id = HydraClient.id_for("Catalog", catalog)

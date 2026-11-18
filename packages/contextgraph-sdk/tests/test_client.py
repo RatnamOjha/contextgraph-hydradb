@@ -1,4 +1,5 @@
 import asyncio
+import json
 import httpx
 import pytest
 
@@ -93,4 +94,30 @@ def test_retry_only_repeats_idempotent_get():
     with ContextGraph("https://example.test", retries=1, http_client=mock_client(handler)) as cg:
         assert cg.health().ok is True
     assert calls == 2
+
+
+def test_generic_catalog_retrieval_posts_bounded_filters_and_preserves_incomplete_state():
+    seen = []
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={
+            "task": "Check refund eligibility for this order", "catalog": "ops",
+            "nodes": [{"id": "ops.refund.check", "label": "Check refund", "type": "Tool",
+                "metadata": {"name": "Check refund", "description": "Evaluate refund eligibility",
+                    "input_schema": {"type": "object"}, "dependencies": ["ops.orders.get"],
+                    "why": ["Task terms match tool name/ID: refund"],
+                    "execution_provenance": "developer_registered"}}],
+            "edges": [], "resolved_entities": [], "retrieval_ms": 1.0,
+            "bounded": {"max_tools": 2}, "missing_dependencies": ["ops.orders.get"], "complete": False,
+        })
+    with ContextGraph("https://example.test", retries=0, http_client=mock_client(handler)) as cg:
+        result = cg.retrieve("Check refund eligibility for this order", catalog="ops", max_tools=2,
+            exclude_tool_ids=["ops.orders.get"])
+    assert seen[0].method == "POST"
+    assert seen[0].url.path == "/api/v1/catalogs/ops/retrieve"
+    assert json.loads(seen[0].content)["exclude_tool_ids"] == ["ops.orders.get"]
+    assert result.tools[0].input_schema == {"type": "object"}
+    assert result.missing_dependencies == ["ops.orders.get"]
+    assert result.complete is False
+    assert result.execution_performed is False
 

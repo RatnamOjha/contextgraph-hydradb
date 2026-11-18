@@ -53,7 +53,8 @@ def _tool_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
-def _normalize_retrieval(payload: dict[str, Any], task: str, order_id: str | None) -> RetrievalResult:
+def _normalize_retrieval(payload: dict[str, Any], task: str, order_id: str | None,
+                         endpoint: str = "/api/graph/explore") -> RetrievalResult:
     nodes = payload.get("nodes", [])
     edges = payload.get("edges", [])
     if not isinstance(nodes, list) or not isinstance(edges, list):
@@ -73,20 +74,24 @@ def _normalize_retrieval(payload: dict[str, Any], task: str, order_id: str | Non
         if isinstance(deps, list):
             dependencies.extend(ToolDependency(source_tool_id=key, required_tool_id=str(dep)) for dep in deps)
 
-    # Prefer actual returned graph edges. Metadata dependencies are a fallback
-    # for old graph responses that omit the corresponding edge.
-    edge_dependencies: list[ToolDependency] = []
+    # Keep declared prerequisite metadata (including missing edges) alongside
+    # the actual graph relationships returned by the backend.
+    edge_dependencies: list[ToolDependency] = list(dependencies)
     for edge in edges:
         if not isinstance(edge, dict) or edge.get("type") != "DEPENDS_ON":
             continue
         source, target = edge.get("from"), edge.get("to")
         if source is not None and target is not None:
             edge_dependencies.append(ToolDependency(source_tool_id=str(source), required_tool_id=str(target)))
-    if edge_dependencies:
-        dependencies = edge_dependencies
+    unique_dependencies = {(dep.source_tool_id, dep.required_tool_id): dep for dep in edge_dependencies}
+    dependencies = list(unique_dependencies.values())
 
     selected = {tool.id for tool in tools}
-    missing = sorted({dep.required_tool_id for dep in dependencies if dep.source_tool_id in selected and dep.required_tool_id not in selected})
+    known = set(payload.get("known_tool_ids") or [])
+    missing = sorted(set(payload.get("missing_dependencies") or []) | {
+        dep.required_tool_id for dep in dependencies if dep.source_tool_id in selected
+        and dep.required_tool_id not in selected and dep.required_tool_id not in known
+    })
     resolved = payload.get("resolved_entities") or []
     skills = payload.get("skills") or []
     source_values = {str((node.get("metadata") or {}).get("execution_provenance", "")) for node in tool_nodes}
@@ -95,16 +100,21 @@ def _normalize_retrieval(payload: dict[str, Any], task: str, order_id: str | Non
     return RetrievalResult(
         task=str(payload.get("task") or task), tools=tools, dependencies=dependencies,
         selection_reasons=reasons, missing_dependencies=missing,
+        omitted_tool_ids=payload.get("omitted_tool_ids") or [],
+        known_tool_ids=sorted(known),
         retrieval_ms=payload.get("retrieval_ms"), source=source,
         metadata=RetrievalMetadata(skills=skills, resolved_entities=resolved,
-            bounded=payload.get("bounded") or {}, endpoint="/api/graph/explore"),
+            bounded=payload.get("bounded") or {}, endpoint=endpoint, catalog=payload.get("catalog")),
+        complete=bool(payload.get("complete", not missing)),
     )
 
 
 def _explanation(result: RetrievalResult) -> RetrievalExplanation:
     return RetrievalExplanation(task=result.task, selected_tool_ids=[tool.id for tool in result.tools],
         selection_reasons=result.selection_reasons, dependencies=result.dependencies,
-        missing_dependencies=result.missing_dependencies, source=result.source,
+        missing_dependencies=result.missing_dependencies, known_tool_ids=result.known_tool_ids,
+        omitted_tool_ids=result.omitted_tool_ids,
+        complete=result.complete, source=result.source,
         retrieval_ms=result.retrieval_ms)
 
 
@@ -160,17 +170,31 @@ class ContextGraph:
         response = self.register_tools(actual_catalog, tools)
         return ingestion_report(name, actual_catalog, response)
 
-    def retrieve(self, task: str, *, order_id: str | None = None) -> RetrievalResult:
+    def retrieve(self, task: str, *, order_id: str | None = None, catalog: str | None = None,
+                 max_tools: int = 8, known_tool_ids: list[str] | None = None,
+                 exclude_tool_ids: list[str] | None = None) -> RetrievalResult:
         if not 8 <= len(task) <= 1200:
             raise ValueError("task must contain 8–1200 characters")
+        if catalog is not None:
+            if order_id is not None:
+                raise ValueError("order_id is only supported by the Olist demo retrieval path")
+            endpoint = f"/api/v1/catalogs/{quote(catalog, safe='')}/retrieve"
+            payload = self._transport.post(endpoint, {"task": task, "max_tools": max_tools,
+                "known_tool_ids": known_tool_ids or [], "exclude_tool_ids": exclude_tool_ids or []})
+            return _normalize_retrieval(payload, task, None, endpoint)
+        if known_tool_ids or exclude_tool_ids or max_tools != 8:
+            raise ValueError("catalog is required for max_tools, known_tool_ids, and exclude_tool_ids")
         params = {"task": task}
         if order_id is not None:
             params["order_id"] = order_id
         payload = self._transport.get("/api/graph/explore", params)
         return _normalize_retrieval(payload, task, order_id)
 
-    def explain(self, task: str, *, order_id: str | None = None) -> RetrievalExplanation:
-        return _explanation(self.retrieve(task, order_id=order_id))
+    def explain(self, task: str, *, order_id: str | None = None, catalog: str | None = None,
+                max_tools: int = 8, known_tool_ids: list[str] | None = None,
+                exclude_tool_ids: list[str] | None = None) -> RetrievalExplanation:
+        return _explanation(self.retrieve(task, order_id=order_id, catalog=catalog, max_tools=max_tools,
+            known_tool_ids=known_tool_ids, exclude_tool_ids=exclude_tool_ids))
 
 
 class AsyncContextGraph:
@@ -216,14 +240,28 @@ class AsyncContextGraph:
         response = await self.register_tools(actual_catalog, tools)
         return ingestion_report(name, actual_catalog, response)
 
-    async def retrieve(self, task: str, *, order_id: str | None = None) -> RetrievalResult:
+    async def retrieve(self, task: str, *, order_id: str | None = None, catalog: str | None = None,
+                       max_tools: int = 8, known_tool_ids: list[str] | None = None,
+                       exclude_tool_ids: list[str] | None = None) -> RetrievalResult:
         if not 8 <= len(task) <= 1200:
             raise ValueError("task must contain 8–1200 characters")
+        if catalog is not None:
+            if order_id is not None:
+                raise ValueError("order_id is only supported by the Olist demo retrieval path")
+            endpoint = f"/api/v1/catalogs/{quote(catalog, safe='')}/retrieve"
+            payload = await self._transport.post(endpoint, {"task": task, "max_tools": max_tools,
+                "known_tool_ids": known_tool_ids or [], "exclude_tool_ids": exclude_tool_ids or []})
+            return _normalize_retrieval(payload, task, None, endpoint)
+        if known_tool_ids or exclude_tool_ids or max_tools != 8:
+            raise ValueError("catalog is required for max_tools, known_tool_ids, and exclude_tool_ids")
         params = {"task": task}
         if order_id is not None:
             params["order_id"] = order_id
         payload = await self._transport.get("/api/graph/explore", params)
         return _normalize_retrieval(payload, task, order_id)
 
-    async def explain(self, task: str, *, order_id: str | None = None) -> RetrievalExplanation:
-        return _explanation(await self.retrieve(task, order_id=order_id))
+    async def explain(self, task: str, *, order_id: str | None = None, catalog: str | None = None,
+                      max_tools: int = 8, known_tool_ids: list[str] | None = None,
+                      exclude_tool_ids: list[str] | None = None) -> RetrievalExplanation:
+        return _explanation(await self.retrieve(task, order_id=order_id, catalog=catalog, max_tools=max_tools,
+            known_tool_ids=known_tool_ids, exclude_tool_ids=exclude_tool_ids))

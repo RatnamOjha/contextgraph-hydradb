@@ -25,7 +25,7 @@ with ContextGraph("http://localhost:8000") as graph:
 
 This SDK currently wraps `/api/health`, `/api/tools`, and `/api/graph/explore`; retrieval remains backed by the existing Olist-oriented skill router. Developer tool definitions can be upserted through `register_tools(catalog, tools)` only when the backend is explicitly configured for trusted loopback development. The public demo does not allow this write route. The API does not authenticate SDK callers. `api_key` is an optional bearer header for deployments behind a separately configured gateway; it does not enable authentication on the current demo server. Do not send secrets to a public unauthenticated endpoint.
 
-For a local backend only, set `CONTEXTGRAPH_ENV=development` and `CONTEXTGRAPH_ENABLE_LOCAL_REGISTRATION=1`. Requests must come from loopback, and the route remains disabled when Render environment markers are present. Registration is an upsert keyed by catalog and tool name; refreshes update schema and catalog fingerprint without deleting omitted tools. Explicit prerequisites must name tools in the same registration batch. The server stores catalog and provenance metadata in HydraDB. This workspace ID is an isolation boundary in the data model, not production authorization or secure multitenancy.
+For a local backend only, set `CONTEXTGRAPH_ENV=development` and `CONTEXTGRAPH_ENABLE_LOCAL_REGISTRATION=1`. Requests must come from loopback, and the route remains disabled when Render environment markers are present. Registration is an upsert keyed by catalog and tool name; refreshes update schema and catalog fingerprint without deleting omitted tools. Explicit prerequisites must name tools in the current registration batch or already registered in that same catalog. The server stores catalog and provenance metadata in HydraDB. This catalog ID is an isolation boundary in the data model, not production authorization or secure multitenancy.
 
 ## Discover an MCP catalog
 
@@ -45,6 +45,22 @@ with ContextGraph("http://127.0.0.1:8000") as graph:
 ```
 
 The async client exposes `await graph.add_mcp_server(...)`. Standard MCP tool metadata does not carry prerequisite relationships, so ingestion does not infer them from descriptions or names. The discovered tool's ID is qualified by server name (for example `company.commerce.get_order`). The developer's agent runtime remains responsible for calling tools and interpreting their results.
+
+## Retrieve from a developer catalog
+
+```python
+context = graph.retrieve(
+    task="Check refund eligibility for order 123",
+    catalog="company",
+    max_tools=8,
+)
+for tool in context.tools:
+    print(tool.id, tool.input_schema)
+print(context.dependencies)
+print(context.selection_reasons)
+```
+
+Custom catalogs use a deterministic lexical rank over tool IDs, names, and descriptions, weighted by how common a term is in that catalog. This is not embedding search. Explicit `DEPENDS_ON` prerequisites are expanded with cycle and size bounds; a missing, excluded, or over-limit prerequisite appears in `missing_dependencies`. Additional candidates omitted by `max_tools` appear in `omitted_tool_ids`; either condition sets `complete=False`. `known_tool_ids` and `exclude_tool_ids` must exactly match IDs in the selected catalog. Known IDs appear as graph context and are omitted from the returned tool definitions; they satisfy a prerequisite only after exact catalog membership validation. Arbitrary values do not satisfy prerequisites. The bounded graph response contains actual stored catalog, server, and dependency relationships. The Olist path remains available with `retrieve(task, order_id=...)` and uses the legacy endpoint.
 
 `inspect_tool()` currently lists the catalog and selects the matching tool because the service has no dedicated inspection endpoint. Network retries are bounded and apply only to idempotent GET requests. The client does not follow redirects.
 
