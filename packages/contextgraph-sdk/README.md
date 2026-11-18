@@ -1,12 +1,12 @@
 # ContextGraph Python SDK
 
-Typed synchronous and asynchronous Python clients for ContextGraph's current read-only retrieval API.
+Typed synchronous and asynchronous Python clients for trusted local MCP catalog ingestion, guarded catalog registration, graph-based tool-context retrieval, and labeled retrieval evaluation. The SDK returns metadata and context; your own agent runtime executes tools.
 
 ```bash
 python -m pip install -e packages/contextgraph-sdk
 ```
 
-The distribution is not published to PyPI. The command above installs from this repository checkout.
+The distribution is not published to PyPI. The command above installs from this repository checkout. For the full isolated backend setup, see `../../docs/SDK_QUICKSTART.md`; for method signatures and request semantics, see `../../docs/SDK_API.md`.
 
 ```python
 from contextgraph import ContextGraph
