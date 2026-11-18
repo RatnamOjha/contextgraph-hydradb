@@ -1,6 +1,6 @@
 # ContextGraph MCP adapter
 
-A lightweight, installable stdio MCP server that lets MCP-compatible agents retrieve tool context from ContextGraph. It is a thin client to the existing FastAPI service; it does not bundle Olist data, connect directly to HydraDB, execute returned tools, or call Groq.
+A lightweight, installable stdio MCP server that lets MCP-compatible agents retrieve tool context from ContextGraph. It uses the same typed Python SDK as application developers; it does not bundle Olist data, connect directly to HydraDB, execute returned tools, or call Groq.
 
 ## Install and run
 
@@ -9,7 +9,7 @@ Python 3.11 or newer is required.
 ```bash
 python -m venv .venv
 . .venv/bin/activate
-pip install .
+pip install -e ../contextgraph-sdk -e .
 CONTEXTGRAPH_API_URL=https://contextgraph-demo.onrender.com contextgraph-mcp
 ```
 
@@ -52,8 +52,8 @@ You can also use an editable local checkout during development:
 
 ## Tools
 
-- `retrieve_context(task, order_id?)` returns selected registered tools, schemas, actual dependency relationships, entity resolution, and retrieval provenance. It never executes a tool.
+- `retrieve_context(task, order_id?, catalog?, max_tools?, known_tool_ids?, exclude_tool_ids?)` returns selected registered tools, schemas, actual dependency relationships, entity resolution, and retrieval provenance. `catalog` selects a developer catalog; omitting it preserves the existing Olist demo route. It never executes a tool.
 - `inspect_tool(tool_id)` reads the tool catalog and returns schema, logical server, prerequisites, incoming dependency references, and provenance.
 - `explain_context(task, order_id?)` explains the current route from returned graph relationships. Saved routing identifiers are not available from the existing API.
 
-The server uses the official Model Context Protocol Python SDK and its stdio transport. Tests cover in-memory protocol calls and a stdio subprocess handshake. The package is not published to PyPI or another registry.
+The server uses the official Model Context Protocol Python SDK and stdio transport. Its API calls go through the ContextGraph Python SDK, so both clients use the same retrieval normalization and dependency semantics. Install both local packages from the monorepo with the command above. Tests cover in-memory protocol calls and a stdio subprocess handshake. Neither package is published to PyPI or another registry.

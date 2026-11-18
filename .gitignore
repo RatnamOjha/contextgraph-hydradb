@@ -1,5 +1,6 @@
 /hydradb-upstream/
 /.hydradb/
+/.hydradb-sdk/
 /web/node_modules/
 /.venv/
 .env

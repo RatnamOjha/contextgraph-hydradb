@@ -7,8 +7,8 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
-import httpx
 from mcp.server.mcpserver import MCPServer
+from contextgraph import AsyncContextGraph, ContextGraphError
 
 DEFAULT_API_URL = "https://contextgraph-demo.onrender.com"
 ORDER_ID_RE = re.compile(r"^[0-9a-f]{32}$", re.I)
@@ -28,25 +28,52 @@ mcp = MCPServer(
 
 
 async def request_json(path: str, params: dict[str, str] | None = None) -> dict[str, Any]:
-    url = f"{API_BASE}{path}"
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0), follow_redirects=False) as client:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
-    except httpx.HTTPStatusError as exc:
-        detail = ""
-        try:
-            body = exc.response.json()
-            detail = str(body.get("detail", ""))[:300]
-        except (ValueError, AttributeError):
-            detail = exc.response.text[:300]
-        raise RuntimeError(f"ContextGraph API returned HTTP {exc.response.status_code}: {detail or 'request rejected'}") from exc
-    except (httpx.HTTPError, ValueError) as exc:
-        raise RuntimeError(f"Could not read ContextGraph API at {API_BASE}: {type(exc).__name__}") from exc
-    if not isinstance(data, dict):
-        raise RuntimeError("ContextGraph API returned an unexpected JSON shape")
-    return data
+        async with AsyncContextGraph(API_BASE, timeout=12.0, retries=1) as graph:
+            if path == "/api/graph/explore":
+                task = (params or {}).get("task", "")
+                result = await graph.retrieve(task, order_id=(params or {}).get("order_id"))
+                return _retrieval_payload(result, (params or {}).get("order_id"))
+            if path == "/api/tools":
+                tools = await graph.list_tools()
+                return {"tools": [{"key": tool.id, "name": tool.name,
+                    "description": tool.description, "schema": tool.input_schema,
+                    "output_schema": tool.output_schema, "server": tool.server,
+                    "skill": tool.skill, "execution_status": tool.execution_status,
+                    "source": tool.provenance, "dependencies": tool.dependencies,
+                    "catalog": tool.model_extra.get("catalog") if tool.model_extra else None}
+                    for tool in tools]}
+            raise ValueError(f"Unsupported SDK-backed endpoint: {path}")
+    except ContextGraphError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
+def _retrieval_payload(result: Any, order_id: str | None = None) -> dict[str, Any]:
+    metadata = result.metadata
+    return {"task": result.task, "order_id": order_id,
+        "catalog": metadata.catalog, "skills": metadata.skills,
+        "nodes": metadata.graph_nodes, "edges": metadata.graph_edges,
+        "resolved_entities": metadata.resolved_entities, "retrieval_ms": result.retrieval_ms,
+        "bounded": metadata.bounded, "missing_dependencies": result.missing_dependencies,
+        "omitted_tool_ids": result.omitted_tool_ids, "complete": result.complete,
+        "execution_performed": result.execution_performed}
+
+
+async def _retrieve_payload(task: str, order_id: str | None, catalog: str | None,
+                            max_tools: int, known_tool_ids: list[str] | None,
+                            exclude_tool_ids: list[str] | None) -> dict[str, Any]:
+    if catalog is None:
+        params = {"task": task}
+        if order_id:
+            params["order_id"] = order_id
+        return await request_json("/api/graph/explore", params)
+    try:
+        async with AsyncContextGraph(API_BASE, timeout=12.0, retries=1) as graph:
+            result = await graph.retrieve(task, catalog=catalog, max_tools=max_tools,
+                known_tool_ids=known_tool_ids, exclude_tool_ids=exclude_tool_ids)
+            return _retrieval_payload(result)
+    except ContextGraphError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def _validate_task_and_order(task: str, order_id: str | None) -> None:
@@ -72,22 +99,32 @@ def _context_result(graph: dict[str, Any]) -> dict[str, Any]:
         "retrieval_relationships": edges,
         "resolved_entities": graph.get("resolved_entities", []),
         "retrieval_ms": graph.get("retrieval_ms"),
-        "provenance": "Read-only HydraDB route returned by ContextGraph /api/graph/explore",
+        "provenance": ("Read-only developer catalog route returned by the ContextGraph SDK"
+            if graph.get("catalog") else "Read-only Olist demo route returned by the ContextGraph SDK"),
         "execution_performed": False,
+        "complete": graph.get("complete", True),
+        "missing_dependencies": graph.get("missing_dependencies", []),
+        "omitted_tool_ids": graph.get("omitted_tool_ids", []),
     }
 
 
 @mcp.tool()
-async def retrieve_context(task: str, order_id: str | None = None) -> dict[str, Any]:
+async def retrieve_context(task: str, order_id: str | None = None, catalog: str | None = None,
+                           max_tools: int = 8, known_tool_ids: list[str] | None = None,
+                           exclude_tool_ids: list[str] | None = None) -> dict[str, Any]:
     """Retrieve task-selected tools, schemas, prerequisites, and provenance from ContextGraph.
 
     This is context retrieval only. It does not execute the returned tools.
     """
     _validate_task_and_order(task, order_id)
-    params = {"task": task}
-    if order_id:
-        params["order_id"] = order_id
-    return _context_result(await request_json("/api/graph/explore", params))
+    if not 1 <= max_tools <= 50:
+        raise ValueError("max_tools must be between 1 and 50")
+    if catalog is not None and order_id is not None:
+        raise ValueError("order_id is only supported by the Olist demo retrieval path")
+    if catalog is None and (known_tool_ids or exclude_tool_ids or max_tools != 8):
+        raise ValueError("catalog is required for generic retrieval options")
+    return _context_result(await _retrieve_payload(task, order_id, catalog, max_tools,
+        known_tool_ids, exclude_tool_ids))
 
 
 @mcp.tool()
@@ -124,13 +161,16 @@ async def inspect_tool(tool_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def explain_context(task: str, order_id: str | None = None) -> dict[str, Any]:
+async def explain_context(task: str, order_id: str | None = None, catalog: str | None = None,
+                         max_tools: int = 8, known_tool_ids: list[str] | None = None,
+                         exclude_tool_ids: list[str] | None = None) -> dict[str, Any]:
     """Explain why tools were selected and which actual graph relationships expanded context."""
     _validate_task_and_order(task, order_id)
-    params = {"task": task}
-    if order_id:
-        params["order_id"] = order_id
-    graph = await request_json("/api/graph/explore", params)
+    if not 1 <= max_tools <= 50:
+        raise ValueError("max_tools must be between 1 and 50")
+    if catalog is None and (known_tool_ids or exclude_tool_ids or max_tools != 8):
+        raise ValueError("catalog is required for generic retrieval options")
+    graph = await _retrieve_payload(task, order_id, catalog, max_tools, known_tool_ids, exclude_tool_ids)
     tools = [node for node in graph.get("nodes", []) if node.get("type") == "Tool"]
     return {
         "task": task,
@@ -143,6 +183,9 @@ async def explain_context(task: str, order_id: str | None = None) -> dict[str, A
         "resolved_entities": graph.get("resolved_entities", []),
         "retrieval_ms": graph.get("retrieval_ms"),
         "saved_routing_id": None,
+        "complete": graph.get("complete", True),
+        "missing_dependencies": graph.get("missing_dependencies", []),
+        "omitted_tool_ids": graph.get("omitted_tool_ids", []),
         "note": "This API does not expose saved routing IDs; the explanation is for the current read-only route.",
     }
 

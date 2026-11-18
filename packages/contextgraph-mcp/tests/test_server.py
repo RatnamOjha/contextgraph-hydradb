@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from mcp import Client
 from mcp.client.stdio import StdioServerParameters
+from contextgraph import RetrievalMetadata, RetrievalResult, ToolDefinition, ToolDependency
 
 from contextgraph_mcp import server
 
@@ -71,6 +72,37 @@ class ContextGraphMCPTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(server, "request_json", new=must_not_call):
             with self.assertRaises(ValueError):
                 await server.retrieve_context("A valid task length", "not-an-order-id")
+
+    async def test_generic_catalog_uses_sdk_and_preserves_existing_tool_contract(self):
+        result = RetrievalResult(task="Check refund eligibility for this order",
+            tools=[ToolDefinition(id="ops.commerce.check_refund", name="Check refund",
+                dependencies=["ops.commerce.get_order"])],
+            dependencies=[ToolDependency(source_tool_id="ops.commerce.check_refund",
+                required_tool_id="ops.commerce.get_order")],
+            selection_reasons={"ops.commerce.check_refund": ["matched refund"]},
+            source="developer_registered", complete=False,
+            missing_dependencies=["ops.commerce.get_order"],
+            metadata=RetrievalMetadata(catalog="ops", endpoint="/api/v1/catalogs/ops/retrieve",
+                graph_nodes=[{"id": "ops.commerce.check_refund", "type": "Tool", "metadata": {"name": "Check refund"}}],
+                graph_edges=[]))
+
+        class FakeAsyncGraph:
+            def __init__(self, *args, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def retrieve(self, task, **kwargs):
+                self.kwargs = kwargs
+                return result
+
+        with patch.object(server, "AsyncContextGraph", new=FakeAsyncGraph):
+            retrieved = await server.retrieve_context(result.task, catalog="ops", max_tools=4,
+                exclude_tool_ids=["ops.commerce.get_order"])
+            explained = await server.explain_context(result.task, catalog="ops", max_tools=4)
+        self.assertEqual([tool["id"] for tool in retrieved["selected_tools"]], ["ops.commerce.check_refund"])
+        self.assertEqual(retrieved["missing_dependencies"], ["ops.commerce.get_order"])
+        self.assertFalse(retrieved["complete"])
+        self.assertFalse(retrieved["execution_performed"])
+        self.assertEqual(explained["selected_tools"], ["ops.commerce.check_refund"])
 
     async def test_stdio_protocol_lists_tools(self):
         async with Client(StdioServerParameters(command=sys.executable,
