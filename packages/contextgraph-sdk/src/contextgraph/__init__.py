@@ -4,6 +4,7 @@ from .exceptions import ContextGraphError
 from .models import (
     ContextGraphErrorInfo,
     HealthResponse,
+    MCPIngestionReport,
     RetrievalExplanation,
     RetrievalMetadata,
     RetrievalResult,
@@ -13,6 +14,6 @@ from .models import (
 
 __all__ = [
     "AsyncContextGraph", "ContextGraph", "ContextGraphError", "ContextGraphErrorInfo",
-    "HealthResponse", "RetrievalExplanation", "RetrievalMetadata", "RetrievalResult",
+    "HealthResponse", "MCPIngestionReport", "RetrievalExplanation", "RetrievalMetadata", "RetrievalResult",
     "ToolDefinition", "ToolDependency",
 ]

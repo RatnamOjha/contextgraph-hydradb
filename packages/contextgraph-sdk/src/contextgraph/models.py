@@ -72,6 +72,15 @@ class RetrievalExplanation(BaseModel):
     execution_performed: Literal[False] = False
 
 
+class MCPIngestionReport(BaseModel):
+    server: str
+    catalog: str
+    discovered_tool_count: int
+    registered_tool_ids: list[str] = Field(default_factory=list)
+    catalog_version: str | None = None
+    fingerprint: str | None = None
+
+
 class ContextGraphErrorInfo(BaseModel):
     message: str
     status_code: int | None = None

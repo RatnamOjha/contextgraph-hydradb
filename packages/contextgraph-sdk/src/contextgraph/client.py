@@ -1,6 +1,7 @@
 """Typed sync and async clients for ContextGraph's read-only retrieval API."""
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 from urllib.parse import quote
@@ -8,8 +9,10 @@ from urllib.parse import quote
 import httpx
 
 from .exceptions import ContextGraphError
+from .mcp_ingestion import discover_stdio_tools, ingestion_report
 from .models import (
     HealthResponse,
+    MCPIngestionReport,
     RetrievalExplanation,
     RetrievalMetadata,
     RetrievalResult,
@@ -138,6 +141,25 @@ class ContextGraph:
         path = f"/api/v1/catalogs/{quote(catalog, safe='')}/tools"
         return self._transport.post(path, {"tools": tools})
 
+    def add_mcp_server(self, name: str, command: str, args: list[str] | None = None, *,
+                       catalog: str | None = None, env: dict[str, str] | None = None,
+                       cwd: str | None = None, timeout: float = 20.0) -> MCPIngestionReport:
+        """Discover tools from an explicitly trusted stdio MCP command and register metadata.
+
+        The configured process is launched, but none of its business tools are called.
+        """
+        actual_catalog = catalog or name
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError("add_mcp_server() cannot run inside an active event loop; use AsyncContextGraph")
+        tools = asyncio.run(discover_stdio_tools(server_name=name, command=command, args=args,
+            env=env, cwd=cwd, timeout=timeout))
+        response = self.register_tools(actual_catalog, tools)
+        return ingestion_report(name, actual_catalog, response)
+
     def retrieve(self, task: str, *, order_id: str | None = None) -> RetrievalResult:
         if not 8 <= len(task) <= 1200:
             raise ValueError("task must contain 8–1200 characters")
@@ -183,6 +205,16 @@ class AsyncContextGraph:
         """Register explicit tool definitions in a trusted local catalog."""
         path = f"/api/v1/catalogs/{quote(catalog, safe='')}/tools"
         return await self._transport.post(path, {"tools": tools})
+
+    async def add_mcp_server(self, name: str, command: str, args: list[str] | None = None, *,
+                             catalog: str | None = None, env: dict[str, str] | None = None,
+                             cwd: str | None = None, timeout: float = 20.0) -> MCPIngestionReport:
+        """Async equivalent of MCP stdio discovery and local catalog registration."""
+        actual_catalog = catalog or name
+        tools = await discover_stdio_tools(server_name=name, command=command, args=args,
+            env=env, cwd=cwd, timeout=timeout)
+        response = await self.register_tools(actual_catalog, tools)
+        return ingestion_report(name, actual_catalog, response)
 
     async def retrieve(self, task: str, *, order_id: str | None = None) -> RetrievalResult:
         if not 8 <= len(task) <= 1200:
