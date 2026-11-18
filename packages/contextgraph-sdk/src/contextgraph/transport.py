@@ -124,6 +124,18 @@ class SyncTransport(_BaseTransport):
                     method="GET", path=path, retryable=True)) from exc
         raise AssertionError("retry loop exited unexpectedly")
 
+    def post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Perform one non-retried write request; registration is an upsert."""
+        try:
+            response = self._ensure_client().post(f"{self.base_url}{path}", json=payload, headers=self._headers)
+            return self._parse(response, "POST", path)
+        except ContextGraphError:
+            raise
+        except httpx.HTTPError as exc:
+            raise ContextGraphError(ContextGraphErrorInfo(
+                message=f"Could not reach ContextGraph API ({type(exc).__name__})",
+                method="POST", path=path, retryable=False)) from exc
+
 
 class AsyncTransport(_BaseTransport):
     def __init__(self, url: str, timeout: float = 15.0, retries: int = 1, api_key: str | None = None,
@@ -165,3 +177,15 @@ class AsyncTransport(_BaseTransport):
                     message=f"Could not reach ContextGraph API ({type(exc).__name__})",
                     method="GET", path=path, retryable=True)) from exc
         raise AssertionError("retry loop exited unexpectedly")
+
+    async def post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Perform one non-retried write request; registration is an upsert."""
+        try:
+            response = await self._ensure_client().post(f"{self.base_url}{path}", json=payload, headers=self._headers)
+            return self._parse(response, "POST", path)
+        except ContextGraphError:
+            raise
+        except httpx.HTTPError as exc:
+            raise ContextGraphError(ContextGraphErrorInfo(
+                message=f"Could not reach ContextGraph API ({type(exc).__name__})",
+                method="POST", path=path, retryable=False)) from exc

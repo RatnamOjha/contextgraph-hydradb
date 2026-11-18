@@ -33,7 +33,11 @@ The current retrieval path is:
 | `GET /api/graph/explore?task=...&order_id=...` | Returns task, optional Olist order ID, candidate skills, bounded nodes/edges, resolved entities, latency, and caps. Tool nodes include schemas, dependencies, provenance, and `why`. It is read-only. | Suitable for an initial SDK `retrieve()`/`explain()` against the demo route. It currently restricts order IDs to Olist's 32-character hex format and ranks with built-in demo skills. |
 | `GET /api/graph?scenario=...` | Returns a graph for one of the fixed demo scenarios. | Not a general SDK retrieval endpoint. |
 
-No existing endpoint registers tools, refreshes a catalog, or supports workspace isolation. No existing `GET /api/tools/{id}` endpoint exists. The MCP adapter obtains these data from `/api/graph/explore` and `/api/tools`, then formats a read-only response itself.
+### Developer catalog registration status
+
+Phase 2 adds `POST /api/v1/catalogs/{catalog}/tools` and SDK `register_tools(catalog, tools)`. It is disabled by default and rejects non-loopback callers, Render runtimes, and requests unless both `CONTEXTGRAPH_ENV=development` and `CONTEXTGRAPH_ENABLE_LOCAL_REGISTRATION=1` are explicitly set. It creates catalog-scoped tool IDs, stores schemas/provenance/fingerprints in HydraDB, and persists only caller-declared prerequisites. Registration is an idempotent upsert; omitted tools remain in the catalog. This is a local development capability, not public catalog ingestion or secure multitenancy. Generic task retrieval for these catalogs is a later phase.
+
+At the Phase 0 audit, no endpoint registered tools or refreshed a catalog. There is still no `GET /api/tools/{id}` endpoint. The MCP adapter obtains existing catalog data from `/api/graph/explore` and `/api/tools`, then formats a read-only response itself.
 
 ## 2. HydraDB graph model and write boundaries
 

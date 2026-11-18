@@ -21,7 +21,9 @@ with ContextGraph("http://localhost:8000") as graph:
 
 ## Current API scope
 
-This SDK currently wraps the ContextGraph demo's `/api/health`, `/api/tools`, and `/api/graph/explore` endpoints. Retrieval is backed by the existing Olist-oriented skill router and optional Olist order identifiers. The API does not yet register arbitrary developer catalogs, offer a single-tool endpoint, or authenticate SDK callers. `api_key` is an optional bearer header for deployments behind a separately configured gateway; it does not enable authentication on the current demo server. Do not send secrets to a public unauthenticated endpoint.
+This SDK currently wraps `/api/health`, `/api/tools`, and `/api/graph/explore`; retrieval remains backed by the existing Olist-oriented skill router. Developer tool definitions can be upserted through `register_tools(catalog, tools)` only when the backend is explicitly configured for trusted loopback development. The public demo does not allow this write route. The API does not authenticate SDK callers. `api_key` is an optional bearer header for deployments behind a separately configured gateway; it does not enable authentication on the current demo server. Do not send secrets to a public unauthenticated endpoint.
+
+For a local backend only, set `CONTEXTGRAPH_ENV=development` and `CONTEXTGRAPH_ENABLE_LOCAL_REGISTRATION=1`. Requests must come from loopback, and the route remains disabled when Render environment markers are present. Registration is an upsert keyed by catalog and tool name; refreshes update schema and catalog fingerprint without deleting omitted tools. Explicit prerequisites must name tools in the same registration batch. The server stores catalog and provenance metadata in HydraDB. This workspace ID is an isolation boundary in the data model, not production authorization or secure multitenancy.
 
 `inspect_tool()` currently lists the catalog and selects the matching tool because the service has no dedicated inspection endpoint. Network retries are bounded and apply only to idempotent GET requests. The client does not follow redirects.
 

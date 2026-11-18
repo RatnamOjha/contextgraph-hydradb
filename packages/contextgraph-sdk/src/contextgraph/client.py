@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -132,6 +133,11 @@ class ContextGraph:
                 return tool
         raise KeyError(f"No tool with id {tool_id!r} is present in the catalog")
 
+    def register_tools(self, catalog: str, tools: list[dict[str, Any]]) -> dict[str, Any]:
+        """Register explicit tool definitions in a trusted local catalog."""
+        path = f"/api/v1/catalogs/{quote(catalog, safe='')}/tools"
+        return self._transport.post(path, {"tools": tools})
+
     def retrieve(self, task: str, *, order_id: str | None = None) -> RetrievalResult:
         if not 8 <= len(task) <= 1200:
             raise ValueError("task must contain 8–1200 characters")
@@ -172,6 +178,11 @@ class AsyncContextGraph:
             if tool.id == tool_id:
                 return tool
         raise KeyError(f"No tool with id {tool_id!r} is present in the catalog")
+
+    async def register_tools(self, catalog: str, tools: list[dict[str, Any]]) -> dict[str, Any]:
+        """Register explicit tool definitions in a trusted local catalog."""
+        path = f"/api/v1/catalogs/{quote(catalog, safe='')}/tools"
+        return await self._transport.post(path, {"tools": tools})
 
     async def retrieve(self, task: str, *, order_id: str | None = None) -> RetrievalResult:
         if not 8 <= len(task) <= 1200:
