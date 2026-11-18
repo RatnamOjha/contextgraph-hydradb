@@ -158,7 +158,7 @@ class ContextGraph:
 
         The configured process is launched, but none of its business tools are called.
         """
-        actual_catalog = catalog or name
+        actual_catalog = catalog or "default"
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -234,7 +234,7 @@ class AsyncContextGraph:
                              catalog: str | None = None, env: dict[str, str] | None = None,
                              cwd: str | None = None, timeout: float = 20.0) -> MCPIngestionReport:
         """Async equivalent of MCP stdio discovery and local catalog registration."""
-        actual_catalog = catalog or name
+        actual_catalog = catalog or "default"
         tools = await discover_stdio_tools(server_name=name, command=command, args=args,
             env=env, cwd=cwd, timeout=timeout)
         response = await self.register_tools(actual_catalog, tools)

@@ -1,5 +1,9 @@
 # ContextGraph
 
+## Python SDK preview
+
+ContextGraph is adding an SDK-first path for registering trusted MCP catalogs and retrieving bounded, dependency-aware tool definitions. The SDK does not execute tools or call an LLM. Its developer-catalog write route is restricted to loopback local development and is disabled on the hosted demo. Start with the [SDK local quick start](docs/SDK_QUICKSTART.md); the package is not published to PyPI.
+
 **More tools. Smaller agent context.** ContextGraph stores skills, tools, dependencies, entity links, and execution evidence in HydraDB, then retrieves a task-specific tool set for an agent. This hackathon demo uses historical Brazilian e-commerce data from Olist.
 
 ## Demo
