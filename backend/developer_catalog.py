@@ -171,7 +171,23 @@ async def register_catalog_tools(db: HydraClient, catalog: str, raw_tools: list[
         await db.query("UNWIND $rows AS row MERGE (s {id: row.id}) SET s:MCPServer, s.key=row.server, s.name=row.server, s.catalog=row.catalog",
             {"rows": [{"id": server_id, "server": server_key, "catalog": catalog}]})
         await _ensure_edge(db, tool_id, "IN_CATALOG", catalog_id)
-        await _ensure_edge(db, tool_id, "PROVIDED_BY", server_id)
+        # A tool may be reassigned to another MCP server on refresh. Reconcile
+        # the relationship from graph state, since _ensure_edge alone would
+        # leave its old PROVIDED_BY edge behind.
+        _, provider_rows, _ = await db.query(
+            "MATCH (t:Tool {id: $id})-[:PROVIDED_BY]->(s:MCPServer) RETURN s.id AS id LIMIT 201",
+            {"id": tool_id})
+        provider_ids = [int(row[0]) for row in provider_rows if row and row[0] is not None]
+        if provider_ids != [server_id]:
+            if provider_rows:
+                await db.query("MATCH (t:Tool {id: $id})-[r:PROVIDED_BY]->() DELETE r", {"id": tool_id})
+            await _ensure_edge(db, tool_id, "PROVIDED_BY", server_id)
+        _, provider_readback, _ = await db.query(
+            "MATCH (t:Tool {id: $id})-[:PROVIDED_BY]->(s:MCPServer) RETURN s.id AS id LIMIT 201",
+            {"id": tool_id})
+        readback_ids = [int(row[0]) for row in provider_readback if row and row[0] is not None]
+        if readback_ids != [server_id]:
+            raise RuntimeError(f"PROVIDED_BY readback mismatch for {key}: expected one current server edge")
         prepared.append((tool, key, tool_id))
     # Nodes are upserted before relationships so prerequisites may appear in
     # any order within the registration batch.

@@ -42,14 +42,14 @@ def _wait_api(url: str, process: subprocess.Popen) -> None:
     raise TimeoutError("isolated ContextGraph API did not become ready")
 
 
-def _read_catalog_record(http_port: int, token: str) -> tuple[str, str]:
+def _read_catalog_record(http_port: int, token: str, catalog: str = "ops") -> tuple[str, str]:
     from backend.hydra import decode_cell
 
     request = urllib.request.Request(
         f"http://127.0.0.1:{http_port}/v1/graphs/default/query",
         data=json.dumps({"cell_id": "cell-0",
             "query": "MATCH (c:Catalog {key: $catalog}) RETURN c.version AS version,c.fingerprint AS fingerprint",
-            "parameters": {"catalog": "ops"}}).encode(),
+            "parameters": {"catalog": catalog}}).encode(),
         headers={"Authorization": f"Bearer {token}", "X-Graph-Namespace": "contextgraph",
             "Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(request, timeout=5) as response:
@@ -58,6 +58,23 @@ def _read_catalog_record(http_port: int, token: str) -> tuple[str, str]:
         raise AssertionError(f"expected one persisted Catalog node, got {len(rows)}")
     version, fingerprint = (decode_cell(value) for value in rows[0])
     return str(version), str(fingerprint)
+
+
+def _hydra_query(http_port: int, token: str, query: str, parameters: dict | None = None):
+    from backend.hydra import decode_cell
+    body = {"cell_id": "cell-0", "query": query}
+    if parameters:
+        body["parameters"] = parameters
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{http_port}/v1/graphs/default/query",
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {token}", "X-Graph-Namespace": "contextgraph",
+            "Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(request, timeout=5) as response:
+        payload = json.load(response)
+    if "error" in payload:
+        raise AssertionError(payload["error"])
+    return [[decode_cell(value) for value in row] for row in payload.get("rows", [])]
 
 
 @pytest.mark.skipif(not NODE.is_file(), reason="build local hydradb-upstream graph-node to run isolated integration")
@@ -111,6 +128,19 @@ def test_new_mcp_catalog_retrieves_only_task_context_and_expands_prerequisites()
                         assert any(dep.source_tool_id == "ops.factory.check_refund"
                             and dep.required_tool_id == "ops.factory.get_order"
                             for dep in dependency_result.dependencies)
+                        known_dependency_result = graph.retrieve(
+                            "Determine refund eligibility for this order", catalog="ops", max_tools=4,
+                            known_tool_ids=["ops.factory.get_order"])
+                        known_nodes = [node for node in known_dependency_result.metadata.graph_nodes
+                            if node.get("id") == "ops.factory.get_order"]
+                        assert len(known_nodes) == 1
+                        assert known_nodes[0]["type"] == "KnownTool"
+                        assert [tool.id for tool in known_dependency_result.tools] == ["ops.factory.check_refund"]
+                        assert known_dependency_result.metadata.bounded["selected_tools"] == 1
+                        assert known_dependency_result.complete is True
+                        assert {("ops.factory.check_refund", "ops.factory.get_order")} <= {
+                            (edge.source_tool_id, edge.required_tool_id)
+                            for edge in known_dependency_result.dependencies}
 
                         # MCP refresh omits prerequisite metadata, so it must
                         # preserve the explicit dependency and catalog identity.
@@ -146,6 +176,54 @@ def test_new_mcp_catalog_retrieves_only_task_context_and_expands_prerequisites()
                         assert "ops.factory.get_order" in all_ids
                         assert len([tool_id for tool_id in all_ids
                             if tool_id.startswith("ops.factory.")]) == 5
+
+                        unrelated_catalog = graph.register_tools("unrelated", [{
+                            "name": "audit.read_record", "server": "audit",
+                            "description": "Read an unrelated audit record",
+                            "input_schema": {"type": "object"},
+                        }])
+                        unrelated_before = _read_catalog_record(ports["http"], token, "unrelated")
+                        assert unrelated_before == (unrelated_catalog["catalog_version"],
+                            unrelated_catalog["fingerprint"])
+                        ops_before_reassign = {tool.id: tool for tool in graph.list_tools()
+                            if tool.catalog == "ops"}
+                        version_before_reassign = schema_update["catalog_version"]
+                        provider_rows_before = _hydra_query(ports["http"], token,
+                            "MATCH (t:Tool {catalog: 'ops'})-[:PROVIDED_BY]->(s:MCPServer) "
+                            "RETURN t.key AS tool,s.key AS server LIMIT 100")
+                        reassigned = graph.register_tools("ops", [{
+                            "name": "factory.check_refund", "server": "factory_v2",
+                        }])
+                        assert reassigned["catalog_version"] != version_before_reassign
+                        check_refund_after = graph.inspect_tool("ops.factory.check_refund")
+                        assert check_refund_after.server == "ops.factory_v2"
+                        assert check_refund_after.dependencies == ["ops.factory.get_order"]
+                        provider_edges = _hydra_query(ports["http"], token,
+                            "MATCH (t:Tool {key: 'ops.factory.check_refund'})-[:PROVIDED_BY]->(s:MCPServer) "
+                            "RETURN s.key AS server LIMIT 10")
+                        assert provider_edges == [["ops.factory_v2"]]
+                        provider_rows_after = _hydra_query(ports["http"], token,
+                            "MATCH (t:Tool {catalog: 'ops'})-[:PROVIDED_BY]->(s:MCPServer) "
+                            "RETURN t.key AS tool,s.key AS server LIMIT 100")
+                        expected_provider_rows = sorted((tool, "ops.factory_v2" if tool == "ops.factory.check_refund" else server)
+                            for tool, server in provider_rows_before)
+                        assert sorted(map(tuple, provider_rows_after)) == expected_provider_rows
+                        ops_after_reassign = {tool.id: tool for tool in graph.list_tools()
+                            if tool.catalog == "ops"}
+                        for tool_id, old_tool in ops_before_reassign.items():
+                            if tool_id == "ops.factory.check_refund":
+                                continue
+                            new_tool = ops_after_reassign[tool_id]
+                            assert new_tool.model_dump() == old_tool.model_dump()
+                        assert _read_catalog_record(ports["http"], token, "unrelated") == unrelated_before
+                        repeated_refresh = graph.register_tools("ops", [{
+                            "name": "factory.check_refund", "server": "factory_v2",
+                        }])
+                        assert repeated_refresh["catalog_version"] == reassigned["catalog_version"]
+                        provider_edges_after_refresh = _hydra_query(ports["http"], token,
+                            "MATCH (t:Tool {key: 'ops.factory.check_refund'})-[:PROVIDED_BY]->(s:MCPServer) "
+                            "RETURN s.key AS server LIMIT 10")
+                        assert provider_edges_after_refresh == [["ops.factory_v2"]]
 
                         refund = graph.retrieve("Determine refund eligibility for this order",
                             catalog="ops", max_tools=4)

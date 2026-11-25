@@ -75,6 +75,11 @@ def test_known_context_is_validated_and_does_not_trigger_dependency_claims():
     assert known["type"] == "KnownTool"
     assert "ops.factory.get_order" not in {node["id"] for node in result["nodes"] if node["type"] == "Tool"}
     assert result["complete"] is True
+    known_nodes = [node for node in result["nodes"] if node.get("id") == "ops.factory.get_order"]
+    assert len(known_nodes) == 1
+    assert known_nodes[0]["type"] == "KnownTool"
+    assert result["bounded"]["selected_tools"] == 1
+    assert len([node for node in result["nodes"] if node.get("type") == "Tool"]) == 1
     with pytest.raises(ValueError, match="must exist in the selected catalog"):
         retrieve("Check refund policy for order", known_tool_ids=["other.get_order"])
 

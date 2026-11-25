@@ -96,8 +96,9 @@ def retrieve_catalog_context(
             expanded.add(current)
             for prerequisite in adjacency.get(current, []):
                 if prerequisite in known:
-                    if prerequisite not in selected:
-                        selected.append(prerequisite)
+                    # Known context is a separate node category. It satisfies
+                    # the dependency without consuming the retrieved-tool
+                    # budget or being counted as a selected tool.
                     continue
                 if prerequisite in excluded or prerequisite not in by_id:
                     missing.add(prerequisite)

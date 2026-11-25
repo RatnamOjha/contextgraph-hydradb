@@ -20,9 +20,23 @@ def definitions():
 class FakeHydra:
     def __init__(self):
         self.calls = []
+        self.provided_by = set()
 
     async def query(self, query, parameters=None):
-        self.calls.append((query, parameters or {}))
+        parameters = parameters or {}
+        self.calls.append((query, parameters))
+        if "PROVIDED_BY" not in query:
+            return [], [], 0.1
+        if "CREATE (a {id: row.source})-[:PROVIDED_BY]->(b {id: row.target})" in query:
+            self.provided_by.update((int(row["source"]), int(row["target"])) for row in parameters.get("rows", []))
+        if "DELETE r" in query:
+            self.provided_by = {edge for edge in self.provided_by if edge[0] != int(parameters["id"])}
+        if "RETURN s.id AS id" in query:
+            source = int(parameters["id"])
+            return [], [[target] for edge_source, target in sorted(self.provided_by) if edge_source == source], 0.1
+        if "RETURN a.id LIMIT 1" in query:
+            edge = (int(parameters["source"]), int(parameters["target"]))
+            return [], [[edge[0]]] if edge in self.provided_by else [], 0.1
         return [], [], 0.1
 
 
