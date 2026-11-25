@@ -16,7 +16,7 @@ SDK implementation verification was recorded locally on 2026-11-18. PR review fo
 | Registration security | A route-level regression test sent a non-loopback write without local opt-in, observed HTTP 403, and asserted no HydraDB query occurred. |
 | Clean installation | Created a new Python virtual environment; editable installs of backend requirements plus `contextgraph-sdk[dev]` and `contextgraph-mcp` completed. `pip check` reported no broken requirements and both packages imported from their source checkouts. This is an install/import check, not a PyPI publication test. |
 | Unqualified pytest discovery | Added `pytest.ini` with explicit test roots and asyncio mode. Unqualified pytest now collects and passes the Groq-free suite in the previously failing environment. |
-| GitHub CI | A workflow was added to build pinned HydraDB commit `916637477f3f34766b4905b270bd4292109d77e6`, require the binary, and run the isolated graph integration test with the rest of the Groq-free suite. Remote status is pending until the PR follow-up commit is pushed. |
+| GitHub CI | PR check [run 45613388301](https://github.com/RatnamOjha/contextgraph-hydradb/actions/runs/45613388301) passed on code head `e951072`. It built pinned HydraDB commit `916637477f3f34766b4905b270bd4292109d77e6` plus LAGraph, required the graph-node binary, passed package import and `pip check`, and ran the isolated graph integration test with the rest of the Groq-free suite. |
 
 ## Test commands and results
 
@@ -26,6 +26,8 @@ The full explicit project, SDK, adapter, and disposable-HydraDB test paths passe
 env -u GROQ_API_KEY python -m pytest -q tests packages/contextgraph-sdk/tests packages/contextgraph-mcp/tests --ignore=tests/test_groq_integration.py
 76 passed in 6.30s (fresh virtual environment; 2026-11-25)
 ```
+
+The GitHub Actions run for `e951072` completed successfully with the same suite: **76 passed in 13.55s** after the isolated HydraDB binary build.
 
 The focused SDK registration and HydraDB/MCP integration set also passed:
 
