@@ -2,7 +2,9 @@
 
 ## Local trusted development
 
-Run `./scripts/sdk-dev.sh` from the repository root. It uses the separate `.hydradb-sdk/` state directory and ports, skips the Olist demo seed, and opts into developer catalog writes for a loopback-only local backend. The normal `./scripts/dev.sh` serves the existing Olist demo with its own graph state.
+Run `./scripts/sdk-dev.sh` from the repository root. It uses the separate `.hydradb-sdk/` state directory and ports, skips the Olist demo seed, opts into developer catalog writes, and forces the ContextGraph API to bind to `127.0.0.1`. `scripts/dev.sh` accepts `CONTEXTGRAPH_API_HOST` and defaults to `0.0.0.0` to preserve the existing Olist demo's network-facing behavior. Do not override the host through the SDK launcher; it intentionally sets loopback directly.
+
+Loopback binding limits network exposure, but it is not authentication. SDK catalog read and retrieval endpoints remain unauthenticated, so a process or user that can connect locally may read registered catalog metadata. Use only local development catalogs on this launcher. Do not treat it as a multi-user service or expose it through a tunnel, reverse proxy, or network port forward.
 
 The SDK server registration endpoint requires all of these conditions:
 

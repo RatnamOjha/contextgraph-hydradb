@@ -163,7 +163,11 @@ def retrieve_catalog_context(
                 edge_truncated = True
     nodes.extend(server_nodes.values())
     selected_ids = set(selected)
-    missing.update(target for source, target in dependencies if source in selected_ids and target not in by_id and target not in known)
+    # Traversal is bounded by both max_tools and depth. Verify every selected
+    # node's direct requirements after traversal so a dependency omitted by
+    # either bound cannot be mistaken for a complete route.
+    missing.update(target for source, target in dependencies
+        if source in selected_ids and target not in selected_ids and target not in known)
     return {
         "task": task, "catalog": catalog, "skills": [], "nodes": nodes, "edges": graph_edges,
         "resolved_entities": [], "retrieval_ms": None,

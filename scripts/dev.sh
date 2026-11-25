@@ -5,6 +5,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HYDRA_SOURCE="${HYDRADB_SOURCE:-$PROJECT_ROOT/hydradb-upstream}"
 STATE_DIR="${CONTEXTGRAPH_STATE_DIR:-$PROJECT_ROOT/.hydradb}"
 API_PORT="${CONTEXTGRAPH_API_PORT:-8000}"
+API_HOST="${CONTEXTGRAPH_API_HOST:-0.0.0.0}"
 HYDRA_HTTP_PORT="${HYDRA_HTTP_PORT:-18443}"
 HYDRA_BOLT_PORT="${HYDRA_BOLT_PORT:-17687}"
 HYDRA_ADMIN_PORT="${HYDRA_ADMIN_PORT:-19091}"
@@ -72,7 +73,7 @@ fi
 if [[ "${CONTEXTGRAPH_SKIP_DEMO_SEED:-0}" == "1" ]]; then
   "$PROJECT_ROOT/.venv/bin/python" -m pip install -e "$PROJECT_ROOT/packages/contextgraph-sdk"
 fi
-(cd "$PROJECT_ROOT" && .venv/bin/python -m uvicorn backend.app:app --host 0.0.0.0 --port "$API_PORT") >"$STATE_DIR/logs/contextgraph.log" 2>&1 & API_PID=$!
+(cd "$PROJECT_ROOT" && .venv/bin/python -m uvicorn backend.app:app --host "$API_HOST" --port "$API_PORT") >"$STATE_DIR/logs/contextgraph.log" 2>&1 & API_PID=$!
 for _ in $(seq 1 60); do
   READY_PATH="/api/health"
   if [[ "${CONTEXTGRAPH_SKIP_DEMO_SEED:-0}" == "1" ]]; then READY_PATH="/openapi.json"; fi

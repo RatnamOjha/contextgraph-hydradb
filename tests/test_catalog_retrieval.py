@@ -80,6 +80,8 @@ def test_known_context_is_validated_and_does_not_trigger_dependency_claims():
     assert known_nodes[0]["type"] == "KnownTool"
     assert result["bounded"]["selected_tools"] == 1
     assert len([node for node in result["nodes"] if node.get("type") == "Tool"]) == 1
+    assert any(edge["from"] == "ops.factory.check_refund" and edge["to"] == "ops.factory.get_order"
+        and edge["type"] == "DEPENDS_ON" for edge in result["edges"])
     with pytest.raises(ValueError, match="must exist in the selected catalog"):
         retrieve("Check refund policy for order", known_tool_ids=["other.get_order"])
 
@@ -96,5 +98,24 @@ def test_tool_cap_reports_candidates_omitted_by_the_bound():
     tools = [node for node in result["nodes"] if node["type"] == "Tool"]
     assert len(tools) <= 1
     assert result["omitted_tool_ids"]
+    assert result["complete"] is False
+
+
+def test_traversal_depth_limit_reports_unselected_direct_prerequisite():
+    tools = [{"key": "ops.chain.start", "catalog": "ops", "name": "Start layered workflow",
+        "description": "Start a workflow"}]
+    tools.extend({"key": f"ops.chain.step{index:02d}", "catalog": "ops",
+        "name": f"Chain operation {index:02d}", "description": "Internal chain operation"}
+        for index in range(1, 12))
+    dependency_names = ["start"] + [f"step{index:02d}" for index in range(1, 12)]
+    dependencies = [(f"ops.chain.{dependency_names[index]}",
+        f"ops.chain.step{index + 1:02d}") for index in range(11)]
+    result = retrieve_catalog_context(catalog="ops", task="Start layered workflow now",
+        tools=tools, dependencies=dependencies, servers=[], max_tools=20)
+    selected = {node["id"] for node in result["nodes"] if node.get("type") == "Tool"}
+    assert result["bounded"]["max_tools"] == 20
+    assert len(selected) < len(tools)
+    assert "ops.chain.step10" in result["missing_dependencies"]
+    assert "ops.chain.step10" not in selected
     assert result["complete"] is False
 
