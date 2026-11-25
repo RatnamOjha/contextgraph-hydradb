@@ -97,7 +97,9 @@ class RegisterToolDefinition(BaseModel):
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
     server: str | None = Field(default=None, max_length=80)
-    prerequisites: list[str] = Field(default_factory=list, max_length=100)
+    # None means "leave the current dependency edges unchanged". An explicit
+    # empty list is the caller's instruction to clear those edges.
+    prerequisites: list[str] | None = Field(default=None, max_length=100)
 
 
 class RegisterToolsRequest(BaseModel):
@@ -255,7 +257,8 @@ async def register_tools(catalog: str, request: Request, body: RegisterToolsRequ
             detail="Developer catalog writes are disabled; enable trusted loopback development mode.")
     try:
         async with _catalog_registration_lock:
-            return await register_catalog_tools(db, catalog, [tool.model_dump() for tool in body.tools])
+            return await register_catalog_tools(db, catalog,
+                [tool.model_dump(exclude_unset=True) for tool in body.tools])
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:

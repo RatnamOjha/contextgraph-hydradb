@@ -30,7 +30,7 @@ def test_stdio_server_discovery_uses_official_protocol_and_registers_only_metada
     names = {tool["name"] for tool in payload["tools"]}
     assert names == {"factory.get_order", "factory.check_refund", "factory.list_replacement_parts",
         "factory.check_part_stock", "factory.schedule_technician"}
-    assert all(tool["prerequisites"] == [] for tool in payload["tools"])
+    assert all("prerequisites" not in tool for tool in payload["tools"])
     assert all(tool["input_schema"] for tool in payload["tools"])
     assert report.server == "factory"
     assert report.catalog == "ops"

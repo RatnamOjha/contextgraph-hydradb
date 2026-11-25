@@ -62,7 +62,6 @@ async def discover_stdio_tools(
                                 "input_schema": input_schema,
                                 "output_schema": output_schema,
                                 "server": server_name,
-                                "prerequisites": [],
                             })
                             if len(tools) > 200:
                                 raise ValueError("MCP server exposes more than 200 tools; split it across catalogs")

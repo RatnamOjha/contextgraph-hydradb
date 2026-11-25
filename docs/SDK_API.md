@@ -63,7 +63,7 @@ Each registration definition has:
 - `server` (optional stable identifier; defaults to the catalog)
 - `prerequisites` (optional list of same-catalog tool names, default empty)
 
-Catalogs accept up to 200 definitions per registration call. A tool's stable ID is `{catalog}.{name}`. Prerequisites may refer to a tool in this call or one already registered in the same catalog. Invalid or unknown prerequisites reject the registration. Re-registering supplied names updates their metadata and explicit dependency set; omitted catalog tools remain stored. The registration API is disabled unless the local trusted-development guard is configured.
+Catalogs accept up to 200 definitions per registration call. A tool's stable ID is `{catalog}.{name}`. Prerequisites may refer to a tool in this call or one already registered in the same catalog. Invalid or unknown prerequisites reject the registration. For each tool, omitted `prerequisites` preserve its current dependency edges, while `prerequisites: []` explicitly clears them and a nonempty list replaces them. Omitted optional metadata fields preserve their stored values on an existing tool; explicit `null` schemas clear those schema values. Newly registered tools start without dependencies unless prerequisites are supplied. Omitted catalog tools remain stored; deletion is not supported by this API. The registration API is disabled unless the local trusted-development guard is configured.
 
 ## Retrieval result
 

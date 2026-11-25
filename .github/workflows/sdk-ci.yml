@@ -1,0 +1,79 @@
+name: ContextGraph SDK CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [feat/contextgraph-sdk]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out ContextGraph
+        uses: actions/checkout@v4
+
+      - name: Check out pinned HydraDB for isolated integration tests
+        uses: actions/checkout@v4
+        with:
+          repository: hydra-db/hydradb
+          ref: 916637477f3f34766b4905b270bd4292109d77e6
+          path: hydradb-upstream
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install HydraDB native build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang libclang-dev cmake pkg-config libcypher-parser-dev libgraphblas-dev
+
+      - name: Cache HydraDB build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hydradb-upstream
+
+      - name: Build isolated HydraDB graph node
+        run: cargo build --locked --features server-runtime --bin graph-node --manifest-path hydradb-upstream/Cargo.toml
+
+      - name: Install backend and both local packages
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -e 'packages/contextgraph-sdk[dev]' -e packages/contextgraph-mcp
+          python -m pip install 'pytest-asyncio>=0.24,<2'
+
+      - name: Check package dependency consistency
+        run: python -m pip check
+
+      - name: Check Python package imports
+        run: python -c 'import contextgraph; import contextgraph_mcp.server; print(contextgraph.__file__); print(contextgraph_mcp.server.__file__)'
+
+      - name: Verify isolated HydraDB is available
+        run: test -x hydradb-upstream/target/debug/graph-node
+
+      - name: Run Groq-free SDK, backend, MCP, and HydraDB regression suite
+        run: |
+          env -u GROQ_API_KEY python -m pytest -q \
+            tests \
+            packages/contextgraph-sdk/tests \
+            packages/contextgraph-mcp/tests \
+            --ignore=tests/test_groq_integration.py
+
+      - name: Summarize isolated integration coverage
+        if: always()
+        run: |
+          {
+            echo '## HydraDB integration coverage'
+            echo 'CI builds pinned HydraDB commit `916637477f3f34766b4905b270bd4292109d77e6` and runs `tests/test_sdk_catalog_integration.py` against temporary isolated storage.'
+            echo 'This test is not treated as passing when skipped: the workflow checks that the built graph-node binary exists before running pytest.'
+          } >> "$GITHUB_STEP_SUMMARY"

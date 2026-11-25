@@ -4,7 +4,7 @@ from urllib.parse import quote
 import httpx
 import pytest
 
-from backend.developer_catalog import register_catalog_tools, validate_catalog_registration
+from backend.developer_catalog import catalog_fingerprint, register_catalog_tools, validate_catalog_registration
 from contextgraph import ContextGraph
 
 
@@ -46,6 +46,38 @@ def test_registration_rejects_implicit_or_cross_catalog_dependencies():
         validate_catalog_registration("commerce", [{"name": "refund", "prerequisites": ["get_order"]}])
 
 
+def test_omitted_prerequisites_are_distinct_from_an_explicit_clear():
+    omitted = validate_catalog_registration("commerce", [{"name": "refund"}])[0]
+    clear = validate_catalog_registration("commerce", [{"name": "refund", "prerequisites": []}])[0]
+    assert omitted["prerequisites"] is None
+    assert clear["prerequisites"] == []
+
+    from backend.app import RegisterToolDefinition
+    assert "prerequisites" not in RegisterToolDefinition(name="refund").model_dump(exclude_unset=True)
+    assert RegisterToolDefinition(name="refund", prerequisites=[]).model_dump(exclude_unset=True)["prerequisites"] == []
+
+
+def test_catalog_fingerprint_covers_complete_effective_metadata_and_dependencies():
+    tools = [
+        {"id": "commerce.get_order", "name": "get_order", "description": "Read an order",
+         "input_schema": {"type": "object", "properties": {"id": {"type": "string"}}},
+         "server": "commerce", "prerequisites": []},
+        {"id": "commerce.check_refund", "name": "check_refund", "description": "Check a refund",
+         "input_schema": {"type": "object"}, "server": "commerce",
+         "prerequisites": ["commerce.get_order"]},
+    ]
+    fingerprint = catalog_fingerprint(tools)
+    assert catalog_fingerprint(list(reversed(tools))) == fingerprint
+
+    changed_schema = [dict(tool) for tool in tools]
+    changed_schema[0] = {**changed_schema[0], "input_schema": {"type": "object", "properties": {"id": {"type": "integer"}}}}
+    assert catalog_fingerprint(changed_schema) != fingerprint
+
+    changed_dependencies = [dict(tool) for tool in tools]
+    changed_dependencies[1] = {**changed_dependencies[1], "prerequisites": []}
+    assert catalog_fingerprint(changed_dependencies) != fingerprint
+
+
 def test_registration_is_idempotent_upsert_and_schema_updates_are_stable_ids():
     first, second = FakeHydra(), FakeHydra()
     original = [{"name": "get_order", "input_schema": {"type": "object", "properties": {"id": {"type": "string"}}}}]
@@ -54,8 +86,6 @@ def test_registration_is_idempotent_upsert_and_schema_updates_are_stable_ids():
     again = asyncio.run(register_catalog_tools(second, "commerce", original))
     refreshed = asyncio.run(register_catalog_tools(FakeHydra(), "commerce", changed))
     assert one["registered"][0]["id"] == refreshed["registered"][0]["id"]
-    assert one["fingerprint"] == again["fingerprint"]
-    assert one["fingerprint"] != refreshed["fingerprint"]
     assert any("MERGE (t {id: row.tool_id})" in query for query, _ in second.calls)
 
 
