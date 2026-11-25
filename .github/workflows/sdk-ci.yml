@@ -3,8 +3,6 @@ name: ContextGraph SDK CI
 on:
   pull_request:
     branches: [main]
-  push:
-    branches: [feat/contextgraph-sdk]
 
 permissions:
   contents: read
