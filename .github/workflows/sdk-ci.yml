@@ -36,6 +36,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential clang libclang-dev cmake pkg-config libcypher-parser-dev libgraphblas-dev
 
+      - name: Build and cache HydraDB's pinned LAGraph dependency
+        uses: ./hydradb-upstream/.github/actions/lagraph
+
       - name: Cache HydraDB build
         uses: Swatinem/rust-cache@v2
         with:
