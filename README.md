@@ -1,12 +1,23 @@
 # ContextGraph
 
+## Developer product: Python SDK
+
+ContextGraph is an SDK-first context retrieval layer for developers building tool-using agents. Connect a trusted local MCP server, store its tool catalog and explicit prerequisites in HydraDB, and retrieve a bounded, explained set of tool definitions for a task. Your own agent runtime chooses arguments and executes the tools. The SDK never executes business tools or calls an LLM. Start with the [SDK local quick start](docs/SDK_QUICKSTART.md), then see the [Python API reference](docs/SDK_API.md), [evaluation methodology](docs/SDK_EVALUATION.md), [security boundaries](docs/SDK_SECURITY.md), [troubleshooting guide](docs/SDK_TROUBLESHOOTING.md), and [actual verification results](docs/SDK_TEST_RESULTS.md). The package is not published to PyPI.
+
 **More tools. Smaller agent context.** ContextGraph stores skills, tools, dependencies, entity links, and execution evidence in HydraDB, then retrieves a task-specific tool set for an agent. This hackathon demo uses historical Brazilian e-commerce data from Olist.
 
 ## Demo
 
 [Open ContextGraph](https://contextgraph-demo.onrender.com). The Render Blueprint is configured for the Free plan. Free services sleep when idle and use ephemeral local storage, so the graph is reseeded after restart. The bundled SQLite demo subset is included in the image.
 
-The dashboard provides Overview, Playground, Graph Explorer, Learning Lab, Tool Registry, Evaluations, and Documentation views. The Graph Explorer reads bounded task routes and same-order Olist entity relationships from HydraDB. The Playground separates deterministic fixture and real Groq execution, then shows retrieved tools, actual calls, and objective-level evidence verification. Learning Lab clearly distinguishes hosted retrieval-filter recovery from the separate local graph-mutation experiment. The evaluation view labels the small isolated deterministic benchmark and its context estimates. A separate sequential real-Groq pilot compares full context, flat lexical retrieval, flat retrieval with prerequisite expansion, and HydraDB graph retrieval. Each observed result gets a stable ID, a local recovery journal entry, and a HydraDB write/readback before the case is marked complete.
+The dashboard provides Overview, Playground, Graph Explorer, Learning Lab, Tool Registry, Evaluations, and Documentation views. This is the Olist historical-data demo, separate from the generic SDK catalog workflow. The Graph Explorer reads bounded task routes and same-order Olist entity relationships from HydraDB. The Playground separates deterministic fixture and real Groq execution, then shows retrieved tools, actual calls, and objective-level evidence verification. Learning Lab distinguishes hosted retrieval-filter recovery from the separate local graph-mutation experiment. The evaluation view labels the isolated deterministic benchmark and its context estimates. A separate real-Groq pilot has preserved results and limitations in [the benchmark report](docs/REAL_AGENT_BENCHMARK.md).
+
+### What is implemented
+
+- **General-purpose SDK:** local Python SDK package, trusted stdio MCP metadata discovery, guarded catalog registration, graph retrieval with explicit prerequisite expansion, explanations, and a labeled flat lexical comparison. Integration tests use a disposable HydraDB graph.
+- **Olist demo:** existing dashboard, deterministic fixture mode, optional separate Groq agent path, historical Olist data, and the associated retrieval/learning demonstrations.
+- **Synthetic-company benchmark:** a separate deterministic dummy-company workflow used to compare retrieval strategies. It is experimental and not a customer deployment.
+- **Still planned for a hosted developer product:** authenticated catalog ownership, secure multitenancy, durable customer storage, remote MCP transports, and package publication. We have no customer-adoption claims.
 
 ### Execution modes
 
@@ -20,7 +31,7 @@ Frontend implementation details and the bounded Graph Explorer API are described
 
 ## Local setup
 
-Python 3.10+ and the dependencies in `requirements.txt` are required. A local HydraDB server is also required; the project documents its checked-out upstream source and supported query path in [docs/HYDRADB_PHASE0.md](docs/HYDRADB_PHASE0.md). Set `HYDRADB_URL` as needed. Copy `.env.example` to `.env`, then set `GROQ_API_KEY` locally if you want real-agent mode. Keep the key out of source control and chat.
+Python 3.10+ and the dependencies in `requirements.txt` are required for the web demo. The standalone SDK package requires Python 3.11+. A local HydraDB server is also required; the project documents its checked-out upstream source and supported query path in [docs/HYDRADB_PHASE0.md](docs/HYDRADB_PHASE0.md). Set `HYDRADB_URL` as needed. Copy `.env.example` to `.env`, then set `GROQ_API_KEY` locally only if you want to use the separate real-agent demo path. Keep the key out of source control and chat.
 
 Import the official Olist archive into the documented 500-order subset:
 
@@ -28,10 +39,12 @@ Import the official Olist archive into the documented 500-order subset:
 python scripts/import_olist.py --archive data/raw/olist.zip --output data/olist_demo.sqlite --orders 500
 ```
 
-Start the local stack with `./scripts/dev.sh`, then open [http://127.0.0.1:8000](http://127.0.0.1:8000). The dev script uses HydraDB's in-memory provider by default and reseeds it at startup. Set `CONTEXTGRAPH_HYDRA_PROVIDER=local` to use the filesystem store instead. To run the isolated synthetic-company demo, set `CONTEXTGRAPH_CATALOG_SCOPE=company`; compare the full catalog, flat retrieval, and graph retrieval with [`scripts/benchmark_company.py`](scripts/benchmark_company.py). See the measured results and limitations in [`docs/DEMO_COMPANY_BENCHMARK.md`](docs/DEMO_COMPANY_BENCHMARK.md). Unit tests run with:
+Start the Olist demo with `./scripts/dev.sh`, then open [http://127.0.0.1:8000](http://127.0.0.1:8000). That script uses its own HydraDB state and seeds the demo catalog at startup. For isolated SDK development, use `./scripts/sdk-dev.sh`; this starts the API on port 8001 with `.hydradb-sdk/` and does not seed or reset the Olist workspace. The setup is documented in [the SDK quick start](docs/SDK_QUICKSTART.md). To run the synthetic-company benchmark, set `CONTEXTGRAPH_CATALOG_SCOPE=company` and use [`scripts/benchmark_company.py`](scripts/benchmark_company.py). Its measured results and limitations are in [`docs/DEMO_COMPANY_BENCHMARK.md`](docs/DEMO_COMPANY_BENCHMARK.md).
+
+Run project and SDK tests without making Groq calls:
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -v
+env -u GROQ_API_KEY python -m pytest -q tests packages/contextgraph-sdk/tests packages/contextgraph-mcp/tests --ignore=tests/test_groq_integration.py
 ```
 
 The real Groq integration test runs only when `GROQ_API_KEY` and a local HydraDB instance are available. The deterministic evaluation is available at `POST /api/evaluate`; `/api/learning/demo` runs controlled deterministic dependency recovery; `/api/learning/agent-demo` runs controlled recovery with real Groq failure evidence and a held-out retest; and `POST /api/learning/rollback/{update_id}` verifies the recorded pre-experiment edge state. Both learning demos keep the existing `DEPENDS_ON` relationship unchanged and use a request-scoped retrieval filter. They are not graph learning. The isolated named-graph write scope required for a separate corrected-graph experiment is not available in the current product runtime, so no graph mutation or learning improvement is claimed. Learning evidence is read back from HydraDB when available; the ignored `data/learning-updates/` sidecar is ephemeral. The Render Free graph store is ephemeral across instance replacement as well. See [HydraDB persistence and learning validation](docs/hydradb-persistence.md) for query constraints, failure diagnosis, deterministic and isolated graph-learning baselines. Run the local isolated experiment with `.venv/bin/python scripts/graph_learning_experiment.py --heldout 3`; it starts a separate temporary HydraDB process and makes no Groq calls.

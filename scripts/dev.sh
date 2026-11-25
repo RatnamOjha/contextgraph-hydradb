@@ -5,6 +5,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HYDRA_SOURCE="${HYDRADB_SOURCE:-$PROJECT_ROOT/hydradb-upstream}"
 STATE_DIR="${CONTEXTGRAPH_STATE_DIR:-$PROJECT_ROOT/.hydradb}"
 API_PORT="${CONTEXTGRAPH_API_PORT:-8000}"
+API_HOST="${CONTEXTGRAPH_API_HOST:-0.0.0.0}"
 HYDRA_HTTP_PORT="${HYDRA_HTTP_PORT:-18443}"
 HYDRA_BOLT_PORT="${HYDRA_BOLT_PORT:-17687}"
 HYDRA_ADMIN_PORT="${HYDRA_ADMIN_PORT:-19091}"
@@ -69,14 +70,23 @@ if [[ ! -x "$PROJECT_ROOT/.venv/bin/uvicorn" ]]; then
   python3 -m venv "$PROJECT_ROOT/.venv"
   "$PROJECT_ROOT/.venv/bin/python" -m pip install -r "$PROJECT_ROOT/requirements.txt"
 fi
-(cd "$PROJECT_ROOT" && .venv/bin/python -m uvicorn backend.app:app --host 0.0.0.0 --port "$API_PORT") >"$STATE_DIR/logs/contextgraph.log" 2>&1 & API_PID=$!
+if [[ "${CONTEXTGRAPH_SKIP_DEMO_SEED:-0}" == "1" ]]; then
+  "$PROJECT_ROOT/.venv/bin/python" -m pip install -e "$PROJECT_ROOT/packages/contextgraph-sdk"
+fi
+(cd "$PROJECT_ROOT" && .venv/bin/python -m uvicorn backend.app:app --host "$API_HOST" --port "$API_PORT") >"$STATE_DIR/logs/contextgraph.log" 2>&1 & API_PID=$!
 for _ in $(seq 1 60); do
-  curl -fsS "http://127.0.0.1:$API_PORT/api/health" >/dev/null 2>&1 && break
+  READY_PATH="/api/health"
+  if [[ "${CONTEXTGRAPH_SKIP_DEMO_SEED:-0}" == "1" ]]; then READY_PATH="/openapi.json"; fi
+  curl -fsS "http://127.0.0.1:$API_PORT$READY_PATH" >/dev/null 2>&1 && break
   sleep .5
 done
-curl -fsS -X POST "http://127.0.0.1:$API_PORT/api/seed" -H 'Content-Type: application/json' -d "{\"catalog_size\":$CATALOG_SIZE,\"catalog_scope\":\"$CATALOG_SCOPE\",\"reset\":true}"
-curl -fsS -X POST "http://127.0.0.1:$API_PORT/api/evaluate" -H 'Content-Type: application/json' -d '{"catalog_size":'"$CATALOG_SIZE"',"iterations":3}' > "$STATE_DIR/logs/initial-evaluation.json"
-echo
+if [[ "${CONTEXTGRAPH_SKIP_DEMO_SEED:-0}" == "1" ]]; then
+  echo "Starting an unseeded SDK workspace; developer catalog writes are enabled only for loopback requests."
+else
+  curl -fsS -X POST "http://127.0.0.1:$API_PORT/api/seed" -H 'Content-Type: application/json' -d "{\"catalog_size\":$CATALOG_SIZE,\"catalog_scope\":\"$CATALOG_SCOPE\",\"reset\":true}"
+  curl -fsS -X POST "http://127.0.0.1:$API_PORT/api/evaluate" -H 'Content-Type: application/json' -d '{"catalog_size":'"$CATALOG_SIZE"',"iterations":3}' > "$STATE_DIR/logs/initial-evaluation.json"
+  echo
+fi
 echo "ContextGraph is ready at http://127.0.0.1:$API_PORT"
 echo "HydraDB provider: $HYDRA_PROVIDER"
 if [[ "$HYDRA_PROVIDER" == "memory" ]]; then
