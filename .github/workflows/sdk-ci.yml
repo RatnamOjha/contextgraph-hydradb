@@ -36,8 +36,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential clang libclang-dev cmake pkg-config libcypher-parser-dev libgraphblas-dev
 
-      - name: Build and cache HydraDB's pinned LAGraph dependency
-        uses: ./hydradb-upstream/.github/actions/lagraph
+      - name: Cache HydraDB's pinned LAGraph dependency
+        id: lagraph-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/lagraph
+          key: lagraph-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('hydradb-upstream/scripts/install_lagraph.sh') }}-graphblas-${{ hashFiles('hydradb-upstream/Cargo.lock') }}
+
+      - name: Build LAGraph
+        if: steps.lagraph-cache.outputs.cache-hit != 'true'
+        working-directory: hydradb-upstream
+        run: bash scripts/install_lagraph.sh "${RUNNER_TEMP}/lagraph"
+
+      - name: Export LAGraph library path
+        run: |
+          test -f "${RUNNER_TEMP}/lagraph/lib/liblagraph.a"
+          echo "LAGRAPH_LIB_DIR=${RUNNER_TEMP}/lagraph/lib" >> "$GITHUB_ENV"
 
       - name: Cache HydraDB build
         uses: Swatinem/rust-cache@v2
